@@ -563,13 +563,15 @@ function generateMaze() {
     player.exploredRooms = new Set();
     player.exploredTiles = new Set();
     // 分身、护盾等玩家状态跨场景保留；传送门交互本身会解除隐身。
-    createRandomItems("key", 10, 250);
+    // 每个场景的基础钥匙数量固定为“房间数 + 3”，确保钥匙总量始终高于房间数量。
+    createRandomItems("key", maze.rooms.length + 3, 250);
     createRandomItems("medkit", 4, 300);
     populateSpecialRooms();
     generateLamps();
     sceneState.timer = 480;
     sceneState.horde = false;
     sceneState.sceneCoins = 0;
+    resetSceneVisualState();
     monsterSpawner.interval = 4.5;
     monsterSpawner.max = 30;
     monsterSpawner.timer = 2.5;
@@ -1603,10 +1605,46 @@ function useStealthPotion() {
     }
 }
 
+function getTeleportPointNearUncollectedKey() {
+    const keysOnGround = maze.items.filter((item) => item.type === "key" && !item.collected);
+    if (keysOnGround.length === 0) return null;
+
+    // 优先选择离玩家稍远的钥匙，避免“随机传送”看起来像几乎没移动。
+    const farKeys = keysOnGround.filter((item) => Math.hypot(item.x - player.x, item.y - player.y) >= maze.tileSize * 3);
+    const candidates = shuffle([...(farKeys.length > 0 ? farKeys : keysOnGround)]);
+    const offsets = shuffle([
+        [1, 0], [-1, 0], [0, 1], [0, -1],
+        [1, 1], [1, -1], [-1, 1], [-1, -1],
+        [2, 0], [-2, 0], [0, 2], [0, -2]
+    ]);
+
+    for (const keyItem of candidates) {
+        const keyTile = worldToTile(keyItem.x, keyItem.y);
+        for (const offset of offsets) {
+            const col = keyTile.col + offset[0];
+            const row = keyTile.row + offset[1];
+            if (!isInsideMap(col, row) || !isWalkableTile(col, row)) continue;
+            if (maze.roomGrid[row][col] !== -1) continue;
+            const point = tileCenter(col, row);
+            if (!canCircleMoveTo(point.x, point.y, player.radius)) continue;
+            return point;
+        }
+    }
+    return null;
+}
+
 function teleportPlayerToCorridor() {
-    const p = randomFloorPosition(0);
+    // 大概率传送到尚未拾取的钥匙附近；没有合适钥匙时保持原来的随机走廊传送。
+    let p = null;
+    if (Math.random() < 0.78) p = getTeleportPointNearUncollectedKey();
+    if (!p) p = randomFloorPosition(0);
     player.x = p.x;
     player.y = p.y;
+
+    // 随机传送也使用换场景时的镜头飞入效果。
+    cameraFx.flyTime = 0;
+    updateCamera();
+    startCameraFlyIn();
 }
 
 function summonClone() {
@@ -3302,9 +3340,16 @@ function updateTrapEffects(dt) {
     }
 }
 
-// 怪物接近闪烁
+// 怪物接近闪烁：只有怪物已经进入警觉，或正在追击/攻击玩家时才触发。
 function updateDangerFlicker(dt) {
-    danger.near = monsters.some((monster) => Math.hypot(monster.x - player.x, monster.y - player.y) < 310);
+    danger.near = monsters.some((monster) => {
+        if (Math.hypot(monster.x - player.x, monster.y - player.y) >= 310) return false;
+        if (monster.state === "alert") return true;
+        if (monster.state === "chase" || monster.state === "attack" || monster.state === "frenzy") {
+            return sceneState.horde || monster.chaseTarget === player;
+        }
+        return false;
+    });
     if (!danger.near) {
         danger.blocked = false;
         danger.timer = random(0.45, 1.1);
@@ -3321,6 +3366,24 @@ function updateDangerFlicker(dt) {
         danger.blackout = random(0.045, 0.085);
         danger.timer = random(0.35, 0.9);
     }
+}
+
+function resetSceneVisualState() {
+    // 新场景/重新开始时彻底清理逃亡模式和雷暴留下的高亮状态。
+    thunder.active = false;
+    thunder.elapsed = 0;
+    thunder.duration = 0;
+    thunder.flashes = [];
+    thunder.flashAlpha = 0;
+    thunder.cooldown = random(12, 24);
+    danger.near = false;
+    danger.blocked = false;
+    danger.timer = random(0.45, 1.1);
+    danger.blackout = 0;
+    feedback.damageAlpha = 0;
+    feedback.damagePulse = 0;
+    feedback.shake = 0;
+    sceneState.transitionTime = 0;
 }
 
 function startThunderEvent() {
@@ -4501,6 +4564,7 @@ function restartGame() {
     monsterExplosionEffects.length = 0;
     notices.length = 0;
     game.style.cursor = "none";
+    resetSceneVisualState();
     generateMaze();
     updateCamera();
     aim.angle = 0;

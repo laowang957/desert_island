@@ -154,7 +154,8 @@ const player = {
     shields: 0,
     maxShields: 2,
     fireSlowTime: 0,
-    monsterSlowTime: 0
+    monsterSlowTime: 0,
+    phaseDashCooldown: 0
 };
 
 // 武器与子弹
@@ -556,6 +557,7 @@ function generateMaze() {
     player.x = spawn.x;
     player.y = spawn.y;
     player.stamina = player.maxStamina;
+    player.phaseDashCooldown = 0;
     player.keys = 0;
     player.gems = {red: false, yellow: false, blue: false};
     player.exploredRooms = new Set();
@@ -1615,6 +1617,8 @@ function summonClone() {
         y: player.y,
         health: maxHealth,
         maxHealth,
+        life: 60,
+        maxLife: 60,
         fireTimer: 0,
         slot: clones.length,
         angle: aim.angle
@@ -1638,8 +1642,13 @@ function damageClone(clone, amount) {
 function updateClones(dt) {
     for (let i = clones.length - 1; i >= 0; i--) {
         const clone = clones[i];
-        if (clone.health <= 0) {
+        clone.life = Math.max(0, (clone.life == null ? 60 : clone.life) - dt);
+        if (clone.health <= 0 || clone.life <= 0) {
             clones.splice(i, 1);
+            for (const monster of monsters) {
+                if (monster.chaseTarget === clone) monster.chaseTarget = null;
+            }
+            if (clone.life <= 0) showNotice("分身时间结束", "warn");
             continue;
         }
         const targetX = player.x + Math.cos(timeNow * 0.002 + i * Math.PI) * 38;
@@ -1671,6 +1680,11 @@ function updateClones(dt) {
 }
 
 function updatePlayer(dt) {
+    if (player.phaseDashCooldown > 0) {
+        player.phaseDashCooldown = Math.max(0, player.phaseDashCooldown - dt);
+        player.stamina = player.maxStamina * (1 - player.phaseDashCooldown);
+        if (player.phaseDashCooldown <= 0) player.stamina = player.maxStamina;
+    }
     if (player.dash) {
         updateDash(dt);
         if (player.hurtFlash > 0) player.hurtFlash = Math.max(0, player.hurtFlash - dt * 2.7);
@@ -1690,7 +1704,7 @@ function updatePlayer(dt) {
     if (keys.has("a") || keys.has("arrowleft")) moveX -= 1;
     if (keys.has("d") || keys.has("arrowright")) moveX += 1;
     player.moving = moveX !== 0 || moveY !== 0;
-    player.running = player.moving && keys.has("shift") && player.stamina > 0;
+    player.running = player.moving && keys.has("shift") && player.stamina > 0 && player.phaseDashCooldown <= 0;
     if (player.moving) {
         const length = Math.hypot(moveX, moveY);
         moveX /= length;
@@ -1710,7 +1724,7 @@ function updatePlayer(dt) {
     if (player.running) {
         player.stamina -= player.staminaUse * getStaminaUseMultiplier() * dt;
         player.stamina = Math.max(0, player.stamina);
-    } else if (!weaponState.triggerDown) {
+    } else if (!weaponState.triggerDown && player.phaseDashCooldown <= 0) {
         const idleRecover = player.moving ? 1 : 1.45;
         const hordeRecover = sceneState.horde ? 1.5 : 1;
         player.stamina += player.staminaRecover * getStaminaRecoverMultiplier() * idleRecover * hordeRecover * dt;
@@ -1758,7 +1772,12 @@ function useStaminaSkill() {
         lastSafeX: player.x,
         lastSafeY: player.y,
         refunded: false,
-        moved: 0
+        moved: 0,
+        enteredWall: false,
+        insideWall: false,
+        crossedWall: false,
+        preWallSafeX: player.x,
+        preWallSafeY: player.y
     };
 }
 
@@ -1780,15 +1799,30 @@ function updateDash(dt) {
     dash.trail.push({x: player.x, y: player.y, life: 0.18});
     if (dash.trail.length > 8) dash.trail.shift();
     if (dash.phaseWall) {
-        if (canCircleMoveTo(player.x, player.y, player.radius)) {
+        const currentSafe = canCircleMoveTo(player.x, player.y, player.radius);
+        if (currentSafe) {
             dash.lastSafeX = player.x;
             dash.lastSafeY = player.y;
+            if (!dash.insideWall) {
+                dash.preWallSafeX = player.x;
+                dash.preWallSafeY = player.y;
+            }
         }
         const nx = player.x + dx;
         const ny = player.y + dy;
         if (isInsideClosedRoomPoint(nx, ny)) {
             finishDash();
             return;
+        }
+        const nextSafe = canCircleMoveTo(nx, ny, player.radius);
+        if (!nextSafe && !dash.insideWall) {
+            dash.enteredWall = true;
+            dash.insideWall = true;
+            dash.preWallSafeX = player.x;
+            dash.preWallSafeY = player.y;
+        } else if (nextSafe && dash.insideWall) {
+            dash.insideWall = false;
+            dash.crossedWall = true;
         }
         player.x = nx;
         player.y = ny;
@@ -1813,39 +1847,40 @@ function updateDash(dt) {
 function finishDash() {
     if (!player.dash) return;
     const dash = player.dash;
-    let refund = false;
+    let failedPhase = false;
     if (dash.phaseWall && !canCircleMoveTo(player.x, player.y, player.radius)) {
         let landed = false;
-        const tolerance = 34;
-        for (let d = 0; d <= maze.tileSize + 46 + tolerance; d += 4) {
-            const offsets = d === 0 ? [0] : [d, -d];
-            for (const offset of offsets) {
-                const nx = player.x + Math.cos(dash.angle) * offset;
-                const ny = player.y + Math.sin(dash.angle) * offset;
-                if (isInsideClosedRoomPoint(nx, ny)) continue;
-                if (!canCircleMoveTo(nx, ny, player.radius)) continue;
-                player.x = nx;
-                player.y = ny;
-                landed = true;
-                break;
-            }
-            if (landed) break;
+        // 优先继续向前找落点，给穿墙留一点容错；找不到才退回墙前。
+        for (let d = 4; d <= maze.tileSize + 80; d += 4) {
+            const nx = player.x + Math.cos(dash.angle) * d;
+            const ny = player.y + Math.sin(dash.angle) * d;
+            if (isInsideClosedRoomPoint(nx, ny)) continue;
+            if (!canCircleMoveTo(nx, ny, player.radius)) continue;
+            player.x = nx;
+            player.y = ny;
+            landed = true;
+            if (dash.enteredWall) dash.crossedWall = true;
+            break;
         }
         if (!landed) {
-            player.x = dash.lastSafeX;
-            player.y = dash.lastSafeY;
-            refund = !dash.katana;
+            player.x = dash.enteredWall ? dash.preWallSafeX : dash.lastSafeX;
+            player.y = dash.enteredWall ? dash.preWallSafeY : dash.lastSafeY;
+            failedPhase = dash.enteredWall;
         }
     }
     if (dash.phaseWall && !dash.katana && isInsideClosedRoomPoint(player.x, player.y)) {
-        player.x = dash.lastSafeX;
-        player.y = dash.lastSafeY;
-        refund = true;
+        player.x = dash.enteredWall ? dash.preWallSafeX : dash.lastSafeX;
+        player.y = dash.enteredWall ? dash.preWallSafeY : dash.lastSafeY;
+        failedPhase = dash.enteredWall;
     }
-    if (dash.phaseWall && !dash.katana && dash.moved < maze.tileSize * 0.32) refund = true;
-    if (refund && !dash.katana) {
-        player.stamina = player.maxStamina;
-        showNotice("冲刺失败，体力已返还", "warn");
+    if (dash.phaseWall && !dash.katana && dash.enteredWall && !dash.crossedWall) {
+        player.x = dash.preWallSafeX;
+        player.y = dash.preWallSafeY;
+        failedPhase = true;
+    }
+    if (failedPhase && !dash.katana) {
+        player.stamina = 0;
+        player.phaseDashCooldown = 1;
     }
     if (dash.katana && dash.killed > 0 && weapons.katana.durability > 0) {
         const cost = sceneState.horde ? 0.5 : 1;
@@ -1859,10 +1894,8 @@ function hitMonstersAlongKatanaDash(dash) {
         if (dash.hit.has(monster)) continue;
         if (Math.hypot(monster.x - player.x, monster.y - player.y) > 30) continue;
         dash.hit.add(monster);
-        if (weapons.katana.durability > 0) {
-            killMonster(monster);
-            dash.killed++;
-        } else knockbackMonster(monster, dash.angle, 34);
+        killMonster(monster);
+        dash.killed++;
     }
 }
 
@@ -1909,7 +1942,9 @@ function getNearestInteractable() {
         }
     }
     for (const item of maze.items) {
-        if (item.collected || (item.type !== "whetstone" && item.type !== "oil")) continue;
+        if (item.collected) continue;
+        const manualItem = item.type === "whetstone" || item.type === "oil" || ["rifle", "shotgun", "katana", "chainsaw"].includes(item.type);
+        if (!manualItem) continue;
         const distance = Math.hypot(item.x - player.x, item.y - player.y);
         if (distance <= 68 && distance < bestDistance) {
             result = {type: "item", target: item, distance};
@@ -2010,6 +2045,7 @@ function useRepairStation(item, weaponId) {
 function canAutoPickupItem(item) {
     if (item.collected) return false;
     if (item.type === "whetstone" || item.type === "oil") return false;
+    if (["rifle", "shotgun", "katana", "chainsaw"].includes(item.type)) return false;
     if ((item.type === "medkit" || item.type === "smallMed") && player.health >= player.maxHealth) return false;
     if ((item.type === "shield" || item.type === "staminaDrop") && player.shields >= player.maxShields) return false;
     if (item.type === "clonePotion" && clones.length >= 2) return false;
@@ -2074,11 +2110,6 @@ function autoPickupItem(item) {
         item.collected = true;
         teleportPlayerToCorridor();
         showNotice("随机传送", "good");
-        return true;
-    }
-    if (["rifle", "shotgun", "katana", "chainsaw"].includes(item.type)) {
-        breakStealth();
-        equipSecondaryFromItem(item);
         return true;
     }
     if (item.type === "rifleAmmo") {
@@ -2291,8 +2322,9 @@ function grantGreatQteReward() {
     const weaponId = ["rifle", "shotgun", "katana", "chainsaw"][Math.floor(Math.random() * 4)];
     const item = {type: weaponId, x: player.x, y: player.y, roomId: -1, collected: false};
     if (weaponId === "rifle" || weaponId === "shotgun") item.weaponMag = weapons[weaponId].magSize;
-    equipSecondaryFromItem(item);
-    showNotice("高精准：获得" + weapons[weaponId].name, "good");
+    if (weaponId === "katana" || weaponId === "chainsaw") item.weaponDurability = weapons[weaponId].maxDurability;
+    maze.items.push(item);
+    showNotice("高精准：掉落" + weapons[weaponId].name + "，按E拾取", "good");
 }
 
 function resolveTrapQte() {
@@ -2889,20 +2921,30 @@ function dropSecondaryInRoom(itemX, itemY, roomId) {
     if (!old) return;
     const extra = {collected: false, roomId, x: itemX, y: itemY, type: old};
     if (old === "rifle" || old === "shotgun") extra.weaponMag = weapons[old].mag;
+    if (old === "katana" || old === "chainsaw") extra.weaponDurability = weapons[old].durability;
     maze.items.push(extra);
 }
 
 function equipSecondaryFromItem(item) {
     const oldCurrent = weaponState.current;
     const old = weaponState.secondary;
-    if (old && old !== item.type) dropSecondaryInRoom(item.x + 10, item.y + 10, item.roomId);
+    const pickupX = item.x;
+    const pickupY = item.y;
+    const pickupRoomId = item.roomId;
+    if (old) dropSecondaryInRoom(pickupX, pickupY, pickupRoomId);
     weaponState.secondary = item.type;
     weaponState.current = item.type;
     weaponState.owned = new Set(["pistol", item.type]);
-    if (item.type === "rifle" || item.type === "shotgun") weapons[item.type].mag = item.weaponMag == null ? weapons[item.type].magSize : item.weaponMag;
+    if (item.type === "rifle" || item.type === "shotgun") {
+        weapons[item.type].mag = item.weaponMag == null ? weapons[item.type].magSize : item.weaponMag;
+    }
+    if (item.type === "katana" || item.type === "chainsaw") {
+        weapons[item.type].durability = item.weaponDurability == null ? weapons[item.type].maxDurability : item.weaponDurability;
+    }
     item.collected = true;
+    breakStealth();
     triggerWeaponUiSwap(oldCurrent);
-    showNotice("拾取 " + weapons[item.type].name, "good");
+    showNotice(old ? "交换为 " + weapons[item.type].name : "拾取 " + weapons[item.type].name, "good");
 }
 
 function startReload() {
@@ -3010,14 +3052,27 @@ function fireShotgun() {
     }
 }
 
+function getMeleeDamage(weaponId) {
+    const weapon = weapons[weaponId];
+    if (!weapon || weapon.type !== "melee") return 0;
+    const ratio = clamp(weapon.durability / Math.max(1, weapon.maxDurability), 0, 1);
+    // 以普通怪 50 点生命为基准：满耐久1击，约70%时2击，50%时3击，30%时4击，30%以下5击。
+    if (ratio >= 0.90) return 50;
+    if (ratio >= 0.70) return 25;
+    if (ratio >= 0.50) return 17;
+    if (ratio >= 0.30) return 13;
+    return 10;
+}
+
 function startMeleeAnimation(weaponId) {
     weaponState.meleeSwingDir *= -1;
-    const duration = weaponId === "katana" ? 0.36 : 0.28;
+    const duration = weapons[weaponId].interval;
     weaponState.meleeAnim = {
         weapon: weaponId,
         time: duration,
         duration,
-        dir: weaponState.meleeSwingDir
+        dir: weaponState.meleeSwingDir,
+        angle: aim.angle
     };
 }
 
@@ -3036,6 +3091,7 @@ function katanaHit() {
     let killed = 0;
     const range = 124;
     const halfArc = 0.78;
+    const damage = getMeleeDamage("katana");
     for (const monster of [...monsters]) {
         const dx = monster.x - player.x;
         const dy = monster.y - player.y;
@@ -3044,16 +3100,12 @@ function katanaHit() {
         const angle = Math.abs(normalizeAngle(Math.atan2(dy, dx) - aim.angle));
         if (angle > halfArc) continue;
         if (!hasLineOfSight(player.x, player.y, monster.x, monster.y)) continue;
-        if (weapons.katana.durability > 0) {
-            monster.health -= weapons.katana.damage;
-            monster.stunTime = Math.max(monster.stunTime || 0, 0.16);
-            knockbackMonster(monster, Math.atan2(dy, dx), 16);
-            if (monster.health <= 0) {
-                killMonster(monster);
-                killed++;
-            }
-        } else {
-            knockbackMonster(monster, aim.angle, 30);
+        monster.health -= damage;
+        monster.stunTime = Math.max(monster.stunTime || 0, 0.16);
+        knockbackMonster(monster, Math.atan2(dy, dx), 16);
+        if (monster.health <= 0) {
+            killMonster(monster);
+            killed++;
         }
     }
     if (killed > 0 && weapons.katana.durability > 0) {
@@ -3064,8 +3116,8 @@ function katanaHit() {
 
 function chainsawContactDamage() {
     if (weaponState.current !== "chainsaw" || weaponState.chainsawRage || player.dash) return;
-    if (weapons.chainsaw.durability <= 0) return;
     const range = 48;
+    const damage = Math.max(3, Math.round(getMeleeDamage("chainsaw") * 0.36));
     for (const monster of [...monsters]) {
         const dx = monster.x - player.x;
         const dy = monster.y - player.y;
@@ -3074,7 +3126,7 @@ function chainsawContactDamage() {
         if (!hasLineOfSight(player.x, player.y, monster.x, monster.y)) continue;
         const angle = Math.abs(normalizeAngle(Math.atan2(dy, dx) - aim.angle));
         if (angle > 0.95) continue;
-        monster.health -= 18;
+        monster.health -= damage;
         monster.stunTime = Math.max(monster.stunTime || 0, 0.08);
         knockbackMonster(monster, Math.atan2(dy, dx), 4);
         if (monster.health <= 0) killMonster(monster);
@@ -3086,6 +3138,7 @@ function chainsawHit(rage, activeSweep = false) {
     const useAngle = rage ? weaponState.chainsawRageAngle : aim.angle;
     const range = rage ? 64 : 112;
     const halfArc = rage ? 0.72 : 1.02;
+    const damage = getMeleeDamage("chainsaw");
     for (const monster of [...monsters]) {
         const dx = monster.x - player.x;
         const dy = monster.y - player.y;
@@ -3094,11 +3147,17 @@ function chainsawHit(rage, activeSweep = false) {
         const angle = Math.abs(normalizeAngle(Math.atan2(dy, dx) - useAngle));
         if (angle > halfArc) continue;
         if (!hasLineOfSight(player.x, player.y, monster.x, monster.y)) continue;
-        if (weapons.chainsaw.durability > 0) {
+        if (rage) {
             killMonster(monster);
             kills++;
-        } else {
-            knockbackMonster(monster, useAngle, 22);
+            continue;
+        }
+        monster.health -= damage;
+        monster.stunTime = Math.max(monster.stunTime || 0, 0.12);
+        knockbackMonster(monster, Math.atan2(dy, dx), 10);
+        if (monster.health <= 0) {
+            killMonster(monster);
+            kills++;
         }
     }
     if (activeSweep && kills > 0 && weapons.chainsaw.durability > 0) {
@@ -3154,7 +3213,6 @@ function updateWeapon(dt) {
     }
     if (weaponState.triggerDown && !weaponState.reloading && !weaponState.chainsawRage && !player.dash) {
         if (weaponState.current === "rifle") fireGun();
-        if (weaponState.current === "chainsaw") meleeAttack();
     }
     if (weaponState.current === "chainsaw") {
         if (!weaponState.chainsawRage && weaponState.chainsawContactTimer <= 0) {
@@ -3548,6 +3606,7 @@ function drawHeldWeaponSprite(x, y, aimAngle, weaponId, alpha = 1) {
     let offset = weaponId === "pistol" ? 16 : 18;
     const anim = weaponState.meleeAnim && weaponState.meleeAnim.weapon === weaponId ? weaponState.meleeAnim : null;
     if (anim) {
+        aimAngle = anim.angle == null ? aimAngle : anim.angle;
         const p = clamp(1 - anim.time / anim.duration, 0, 1);
         const sweep = (p * 2 - 1) * anim.dir;
         const strength = weaponId === "katana" ? 1.12 : 0.92;
@@ -3563,34 +3622,29 @@ function drawMeleeAttackArc(x, y, aimAngle, weaponId, anim, alpha) {
     const p = clamp(1 - anim.time / anim.duration, 0, 1);
     const pulse = Math.sin(p * Math.PI);
     if (pulse <= 0.02) return;
+    const baseAngle = anim.angle == null ? aimAngle : anim.angle;
     const dir = anim.dir;
+    const sweepHalf = weaponId === "katana" ? 0.82 : 0.92;
+    const center = baseAngle + ((p * 2 - 1) * sweepHalf * dir);
+    const segment = weaponId === "katana" ? 0.46 : 0.54;
+    const radius = weaponId === "katana" ? 104 : 92;
     ctx.save();
     ctx.globalAlpha = alpha * pulse;
     ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.arc(x, y, radius, center - segment, center + segment);
     if (weaponId === "katana") {
-        const radius = 104;
-        const start = aimAngle - 1.05 * dir;
-        const end = aimAngle + 1.05 * dir;
-        ctx.strokeStyle = "rgba(220,240,255,0.88)";
+        ctx.strokeStyle = "rgba(220,240,255,0.92)";
         ctx.lineWidth = 8;
-        ctx.beginPath();
-        if (dir > 0) ctx.arc(x, y, radius, start, end);
-        else ctx.arc(x, y, radius, end, start, true);
         ctx.stroke();
-        ctx.strokeStyle = "rgba(120,190,255,0.38)";
+        ctx.strokeStyle = "rgba(120,190,255,0.34)";
         ctx.lineWidth = 18;
         ctx.stroke();
     } else if (weaponId === "chainsaw") {
-        const radius = 90;
-        const start = aimAngle - 0.95 * dir;
-        const end = aimAngle + 0.95 * dir;
-        ctx.strokeStyle = "rgba(255,176,95,0.82)";
+        ctx.strokeStyle = "rgba(255,176,95,0.86)";
         ctx.lineWidth = 11;
-        ctx.beginPath();
-        if (dir > 0) ctx.arc(x, y, radius, start, end);
-        else ctx.arc(x, y, radius, end, start, true);
         ctx.stroke();
-        ctx.strokeStyle = "rgba(255,70,45,0.26)";
+        ctx.strokeStyle = "rgba(255,70,45,0.24)";
         ctx.lineWidth = 20;
         ctx.stroke();
     }
@@ -3943,7 +3997,10 @@ function drawInteractPrompt() {
     let text = "";
     if (target.type === "item") {
         const item = target.target;
-                if (item.type === "whetstone") text = item.cooldown > 0 ? "磨刀石冷却 " + Math.ceil(item.cooldown) + "s" : "E 使用磨刀石";
+        if (["rifle", "shotgun", "katana", "chainsaw"].includes(item.type)) {
+            text = weaponState.secondary ? "E 交换 " + weapons[item.type].name : "E 拾取 " + weapons[item.type].name;
+        }
+        if (item.type === "whetstone") text = item.cooldown > 0 ? "磨刀石冷却 " + Math.ceil(item.cooldown) + "s" : "E 使用磨刀石";
         if (item.type === "oil") text = item.cooldown > 0 ? "机油冷却 " + Math.ceil(item.cooldown) + "s" : "E 使用机油";
     }
     if (target.type === "door") text = player.keys > 0 ? "E 开门" : "需要钥匙";
@@ -4154,16 +4211,33 @@ function drawGemObjectiveHud() {
         const color = colors[i];
         const x = startX + i * 42;
         const y = 76;
-        const active = !!player.gems[color] || !!(maze.portal && maze.portal.inserted && maze.portal.inserted[color]);
+        const held = !!player.gems[color];
+        const inserted = !!(maze.portal && maze.portal.inserted && maze.portal.inserted[color]);
+        const active = held || inserted;
         ctx.beginPath();
         ctx.arc(x, y, 15, 0, Math.PI * 2);
-        ctx.fillStyle = active ? "rgba(255,255,255,0.16)" : "rgba(0,0,0,0.55)";
+        ctx.fillStyle = inserted ? "rgba(92,210,118,0.18)" : active ? "rgba(255,255,255,0.16)" : "rgba(0,0,0,0.55)";
         ctx.fill();
-        ctx.strokeStyle = active ? "white" : "rgba(255,255,255,0.35)";
-        ctx.lineWidth = active ? 2.5 : 1.5;
+        ctx.strokeStyle = inserted ? "#78e28d" : active ? "white" : "rgba(255,255,255,0.35)";
+        ctx.lineWidth = inserted ? 3 : active ? 2.5 : 1.5;
         ctx.stroke();
         const image = images[color];
         if (active && image && image.complete && image.naturalWidth) ctx.drawImage(image, x - 10, y - 10, 20, 20);
+        if (inserted) {
+            ctx.beginPath();
+            ctx.arc(x + 11, y + 11, 7, 0, Math.PI * 2);
+            ctx.fillStyle = "#39b85a";
+            ctx.fill();
+            ctx.strokeStyle = "black";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.font = "bold 10px sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillStyle = "white";
+            ctx.fillText("✓", x + 11, y + 11.5);
+            ctx.textBaseline = "top";
+        }
     }
     ctx.restore();
 }
@@ -4193,6 +4267,13 @@ function drawKeysAndHelp() {
     ctx.strokeText(coinText, 20, 94);
     ctx.fillStyle = "#f1c84a";
     ctx.fillText(coinText, 20, 94);
+    if (clones.length > 0) {
+        const cloneText = "分身 " + clones.map((clone) => Math.ceil(Math.max(0, clone.life || 0)) + "s").join(" / ");
+        ctx.strokeStyle = "black";
+        ctx.strokeText(cloneText, 20, 114);
+        ctx.fillStyle = "#7fe7ff";
+        ctx.fillText(cloneText, 20, 114);
+    }
     ctx.restore();
 }
 
@@ -4399,6 +4480,7 @@ function restartGame() {
     player.health = player.maxHealth;
     player.stamina = player.maxStamina;
     player.monsterSlowTime = 0;
+    player.phaseDashCooldown = 0;
     player.invisibleTime = 0;
     player.shields = 0;
     clones.length = 0;

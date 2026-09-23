@@ -10,6 +10,56 @@ game.addEventListener("pointerdown", () => {
 const visionCanvas = document.createElement("canvas");
 const visionCtx = visionCanvas.getContext("2d");
 
+
+// 首次打开页面的资源加载门：关键资源未准备好前，不进入操作模式选择。
+const startupLoadingUi = (() => {
+    const style = document.createElement("style");
+    style.textContent = `
+        #game-startup-loading{position:fixed;inset:0;z-index:20000;display:flex;align-items:center;justify-content:center;background:#050608;color:#f4f4f4;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;user-select:none;-webkit-user-select:none;}
+        #game-startup-loading .loading-panel{width:min(460px,82vw);text-align:center;}
+        #game-startup-loading .loading-title{font-size:22px;font-weight:650;letter-spacing:.12em;margin-bottom:11px;}
+        #game-startup-loading .loading-sub{font-size:12px;color:rgba(255,255,255,.55);min-height:20px;margin-bottom:18px;}
+        #game-startup-loading .loading-track{height:3px;background:rgba(255,255,255,.12);overflow:hidden;border-radius:3px;}
+        #game-startup-loading .loading-bar{height:100%;width:0;background:rgba(255,255,255,.88);transition:width .16s ease;}
+        #game-startup-loading .loading-percent{margin-top:10px;font-size:11px;color:rgba(255,255,255,.45);font-variant-numeric:tabular-nums;}
+        #game-startup-loading .loading-error{display:none;margin-top:17px;color:#f0b7b7;font-size:12px;line-height:1.7;}
+        #game-startup-loading .loading-retry{display:none;margin:16px auto 0;padding:9px 20px;border:1px solid rgba(255,255,255,.42);border-radius:8px;background:rgba(255,255,255,.06);color:#fff;font-size:13px;cursor:pointer;}
+    `;
+    document.head.appendChild(style);
+    const root = document.createElement("div");
+    root.id = "game-startup-loading";
+    root.innerHTML = `<div class="loading-panel"><div class="loading-title">正在进入迷宫</div><div class="loading-sub">准备基础资源…</div><div class="loading-track"><div class="loading-bar"></div></div><div class="loading-percent">0%</div><div class="loading-error"></div><button class="loading-retry">重新加载</button></div>`;
+    document.body.appendChild(root);
+    const sub = root.querySelector(".loading-sub");
+    const bar = root.querySelector(".loading-bar");
+    const percent = root.querySelector(".loading-percent");
+    const error = root.querySelector(".loading-error");
+    const retry = root.querySelector(".loading-retry");
+    retry.addEventListener("click", () => window.location.reload());
+    return {
+        update(done, total, text) {
+            const value = total > 0 ? Math.round(done / total * 100) : 0;
+            bar.style.width = clamp(value, 0, 100) + "%";
+            percent.textContent = clamp(value, 0, 100) + "%";
+            if (text) sub.textContent = text;
+        },
+        fail(names) {
+            sub.textContent = "基础资源没有加载完整";
+            error.style.display = "block";
+            error.textContent = `缺少或加载失败：${names.join("、")}。游戏不会使用占位音继续进入，请检查 audio/assets 文件后重试。`;
+            retry.style.display = "block";
+        },
+        complete() {
+            bar.style.width = "100%";
+            percent.textContent = "100%";
+            sub.textContent = "准备完成";
+            root.style.transition = "opacity .22s ease";
+            root.style.opacity = "0";
+            setTimeout(() => root.remove(), 240);
+        }
+    };
+})();
+
 const spriteAssets = {};
 function resolveGameScriptUrl() {
     if (document.currentScript && document.currentScript.src) return document.currentScript.src;
@@ -38,6 +88,21 @@ function loadSprite(name, src) {
     spriteAssets[name] = image;
     return image;
 }
+function loadRemoteSprite(name, remoteUrl, fallbackSrc) {
+    const image = new Image();
+    let fallbackUsed = false;
+    image.onerror = () => {
+        if (fallbackUsed || !fallbackSrc) {
+            console.error("网络资源加载失败:", name, image.src);
+            return;
+        }
+        fallbackUsed = true;
+        image.src = new URL(fallbackSrc.replace(/^assets\//, ""), ASSET_BASE_URL).href;
+    };
+    image.src = remoteUrl;
+    spriteAssets[name] = image;
+    return image;
+}
 const assets = {
     pistol: loadSprite("pistol", "assets/pistol.png"),
     rifle: loadSprite("rifle", "assets/rifle.png"),
@@ -53,7 +118,16 @@ const assets = {
     rifleAmmo: loadSprite("rifleAmmo", "assets/rifleAmmo.png"),
     shotgunAmmo: loadSprite("shotgunAmmo", "assets/shotgunAmmo.png"),
     whetstone: loadSprite("whetstone", "assets/whetstone.png"),
-    oil: loadSprite("oil", "assets/oil.png")
+    oil: loadSprite("oil", "assets/oil.png"),
+    watcherFace: loadSprite("watcherFace", "assets/watcher_face.svg"),
+    bones: loadSprite("bones", "assets/bones.svg"),
+    shadowFigure: loadSprite("shadowFigure", "assets/shadow_figure.svg"),
+    shadowFigureWeb: loadSprite("shadowFigureWeb", "assets/top-down-ghost.png"),
+    roomMedical: loadSprite("roomMedical", "assets/room_medical.svg"),
+    roomArmory: loadSprite("roomArmory", "assets/room_armory.svg"),
+    roomRepair: loadSprite("roomRepair", "assets/room_repair.svg"),
+    roomSupply: loadSprite("roomSupply", "assets/room_supply.svg"),
+    roomRuin: loadSprite("roomRuin", "assets/room_ruin.svg")
 };
 const themeAssets = {
     urban: {
@@ -83,22 +157,518 @@ function getCurrentThemeAssets() {
     return themeAssets[maze.theme] || themeAssets.urban;
 }
 
-// 高清展示的奥秘😏
-function resizeCanvas() {
-    const width = window.innerWidth;
-    const height = window.innerHeight;
-    const dpr = window.devicePixelRatio || 1;
+// 声音：不铺背景音乐，保留大面积安静，只让脚步、滴水、怪物窸窣和行为音效偶尔打破寂静。
+// 正式版音效全部使用本地资源；不再运行时访问第三方站点。
+const AUDIO_BASE_URL = new URL("./audio/", GAME_SCRIPT_URL);
+const audioFiles = {
+    // 玩家脚步改用用户提供的三段式脚步资源，截取其中较慢和较快的单步样本。
+    walkStep1: {local: "walk_step_1.wav"},
+    walkStep2: {local: "walk_step_2.wav"},
+    walkStep3: {local: "walk_step_3.wav"},
+    walkStep4: {local: "walk_step_4.wav"},
+    runStep1: {local: "run_step_1.wav"},
+    runStep2: {local: "run_step_2.wav"},
+    runStep3: {local: "run_step_3.wav"},
+    runStep4: {local: "run_step_4.wav"},
+    pistol: {local: "pistol_fire.wav"},
+    rifle: {local: "rifle_fire.mp3"},
+    shotgun: {local: "shotgun_fire.wav"},
+    shotgunBoom: {local: "shotgun_boom.wav"},
+    katana: {local: "katana.wav"},
+    chainsawSweep: {local: "chainsaw_attack_user.wav"},
+    chainsawIdle: {local: "chainsaw_idle_user.wav"},
+    dashSkill: {local: "dash_skill.wav"},
+    katanaSkill: {local: "katana.wav"},
+    chainsawSkill: {local: "chainsaw_attack_user.wav"},
+    dryFire: {local: "dry_fire.mp3"},
+    portalReveal: {local: "portal_reveal.wav"},
+    portalHum: {local: "portal_hum.wav"},
+    pickup: {local: "pickup_click.flac"},
+    doorOpen: {local: "door_open_real.wav"},
+    doorClose: {local: "door_open_real.wav"},
+    // 三段真实雷鸣录音，都是“闪电 + 持续轰隆”的自然雷声；本地 thunder.wav 仅作网络失败兜底。
+    thunder1: {local: "thunder_1.mp3"},
+    thunder2: {local: "thunder_2.mp3"},
+    thunder3: {local: "thunder_3.mp3"},
+    portal: {local: "teleport.wav"},
+    drip: {local: "water_drip.wav"},
+    monsterRustle: {local: "monster_rustle.ogg"},
+    reloadMag: {local: "reload_mag.wav"},
+    reloadRifle: {local: "reload_rifle.wav"},
+    reloadShell: {local: "reload_shell.wav"},
+    reloadClick: {local: "reload_click.mp3"},
+    shotgunCock: {local: "shotgun_cock.wav"},
+    // QTE 音效使用用户提供的四个本地资源，不再依赖外部网站。
+    qteWarning: {local: "qte_advertise.ogg"},
+    qteGood: {local: "qte_good_custom.ogg"},
+    qteGreat: {local: "qte_great_custom.ogg"},
+    qteFail: {local: "qte_fail_custom.ogg"},
+    shadowWarning: {local: "shadow_warning_real.ogg"},
+    watcher: {local: "watcher.wav"},
+    monsterAlert: {local: "monster_alert.wav"}, monsterAttack: {local: "monster_attack.wav"},
+    damage: {local: "damage.wav"}, shield: {local: "shield.wav"}, coin: {local: "coin.wav"}
+};
+const audioState = {
+    unlocked: false,
+    chainsawIdle: null,
+    chainsawSweepAudio: null,
+    chainsawRageAudio: null,
+    footstepWalkPool: [],
+    footstepRunPool: [],
+    stepTimer: 0,
+    stepWalkIndex: 0,
+    stepRunIndex: 0,
+    warmupAudios: [],
+    templates: new Map(),
+    pools: new Map(),
+    readyNames: new Set(),
+    failedNames: new Set(),
+    loadingPromises: new Map(),
+    // 水滴保持极低频：一次事件只滴 1~3 下，然后重新进入很长的安静期。
+    dripTimer: random(90, 240),
+    dripSequenceRemaining: 0,
+    dripSequenceTimer: 0,
+    monsterRustleTimer: random(0.5, 1.2),
+    shadowWarningImmediate: null,
+    thunderPool: [],
+    thunderPoolIndex: 0,
+    qteWarningImmediate: null,
+    qteGoodImmediate: null,
+    qteGreatImmediate: null,
+    qteFailImmediate: null,
+    portalHum: null
+};
+const resolvedAudioSources = new Map();
+function getAudioSourceConfig(name) {
+    const source = audioFiles[name];
+    if (!source) return null;
+    return typeof source === "string" ? {local: source} : source;
+}
+function getAudioFallbackUrl(config) {
+    return config && config.local ? new URL(config.local, AUDIO_BASE_URL).href : null;
+}
+
+function createAudio(name, loop = false, volume = 1) {
+    const config = getAudioSourceConfig(name);
+    if (!config) return null;
+    const url = getAudioFallbackUrl(config);
+    if (!url) return null;
+    const a = new Audio();
+    a.preload = "auto";
+    a.loop = loop;
+    a.volume = clamp(volume, 0, 1);
+    a.__audioName = name;
+    a.__wantPlay = false;
+    a.src = resolvedAudioSources.get(name) || url;
+    return a;
+}
+
+function isAudioPlayable(a) {
+    return !!(a && !a.error && a.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA);
+}
+
+function buildAudioPool(name, template, size = 4) {
+    const pool = [template];
+    const src = template.currentSrc || template.src;
+    if (!src) return pool;
+    for (let i = 1; i < size; i++) {
+        const a = new Audio(src);
+        a.preload = "auto";
+        a.__audioName = name;
+        a.volume = 0;
+        try { a.load(); } catch (_) {}
+        pool.push(a);
+    }
+    audioState.pools.set(name, pool);
+    return pool;
+}
+
+// 单个声音只负责“预加载”，不会顺带播放。失败后也不会排队等待以后补播。
+function preloadAudioResource(name, timeoutMs = 12000) {
+    if (audioState.readyNames.has(name)) return Promise.resolve(true);
+    if (audioState.loadingPromises.has(name)) return audioState.loadingPromises.get(name);
+    const promise = new Promise((resolve) => {
+        const a = createAudio(name, false, 0);
+        if (!a || !a.src) {
+            audioState.failedNames.add(name);
+            resolve(false);
+            return;
+        }
+        audioState.warmupAudios.push(a);
+        audioState.templates.set(name, a);
+        let settled = false;
+        const finish = (ok) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            a.removeEventListener("canplaythrough", onReady);
+            a.removeEventListener("canplay", onReady);
+            a.removeEventListener("error", onError);
+            if (ok) {
+                audioState.readyNames.add(name);
+                audioState.failedNames.delete(name);
+                resolvedAudioSources.set(name, a.currentSrc || a.src);
+                buildAudioPool(name, a, name === "pistol" ? 5 : 3);
+            } else {
+                audioState.failedNames.add(name);
+            }
+            resolve(ok);
+        };
+        const onReady = () => finish(true);
+        const onError = () => finish(false);
+        a.addEventListener("canplaythrough", onReady, {once:true});
+        a.addEventListener("canplay", onReady, {once:true});
+        a.addEventListener("error", onError, {once:true});
+        const timer = setTimeout(() => finish(isAudioPlayable(a)), timeoutMs);
+        try { a.load(); } catch (_) { finish(false); }
+        if (isAudioPlayable(a)) finish(true);
+    });
+    audioState.loadingPromises.set(name, promise);
+    return promise;
+}
+
+const CORE_AUDIO_NAMES = [
+    "walkStep1","walkStep2","walkStep3","walkStep4",
+    "runStep1","runStep2","runStep3","runStep4",
+    "pistol","damage","monsterRustle","monsterAlert","monsterAttack",
+    "dryFire","reloadMag","doorOpen","pickup"
+];
+
+function preloadRemainingAudioResources() {
+    const remaining = Object.keys(audioFiles).filter(name => !CORE_AUDIO_NAMES.includes(name));
+    remaining.forEach((name, index) => {
+        setTimeout(() => { preloadAudioResource(name, 18000); }, index * 90);
+    });
+}
+
+// 保留兼容入口：需要全量预取时仍可调用，但首次进入不再等待所有后期资源。
+function preloadAllAudioResources() {
+    return Promise.all(Object.keys(audioFiles).map(name => preloadAudioResource(name, 18000)));
+}
+
+// 不排队：当前这一刻不可播放，就直接放弃这一次声音。
+function requestAudioPlay(a) {
+    // 不要用 readyState 作为播放前的硬门槛。
+    // pause() + currentTime = 0 会让 Chrome 暂时回落到 HAVE_METADATA(1)，
+    // 但此时直接 play() 是合法的，浏览器会在数据可用后自动开始播放。
+    if (!a || !a.src) return false;
+    if (a.error) {
+        console.warn("[audio] media error:", a.__audioName || a.src, a.error);
+        return false;
+    }
+    a.__wantPlay = false;
+    try {
+        const promise = a.play();
+        if (promise && promise.catch) {
+            promise.catch((err) => {
+                console.warn("[audio] play failed:", a.__audioName || a.src, err && (err.name + ": " + err.message));
+            });
+        }
+        return true;
+    } catch (err) {
+        console.warn("[audio] play threw:", a.__audioName || a.src, err);
+        return false;
+    }
+}
+
+function createLocalPreloadedAudio(filename, volume = 1) {
+    const a = new Audio(new URL(filename, AUDIO_BASE_URL).href);
+    a.preload = "auto";
+    a.volume = clamp(volume, 0, 1);
+    a.__wantPlay = false;
+    try { a.load(); } catch (_) {}
+    return a;
+}
+
+function playImmediateAudio(a, volume = 0.25, rate = 1) {
+    if (!audioState.unlocked || !isAudioPlayable(a)) return false;
+    try {
+        a.pause();
+        a.currentTime = 0;
+        a.volume = clamp(volume, 0, 1);
+        a.playbackRate = clamp(rate, 0.72, 1.40);
+        return requestAudioPlay(a);
+    } catch (_) { return false; }
+}
+
+function playImmediateThunder(volume = 0.32, rate = 1) {
+    if (!audioState.thunderPool.length) {
+        playSfx("thunder1", volume, rate);
+        return;
+    }
+    const a = audioState.thunderPool[audioState.thunderPoolIndex++ % audioState.thunderPool.length];
+    playImmediateAudio(a, volume, rate);
+}
+
+function playImmediateShadowWarning(volume = 0.11, rate = 1) {
+    if (audioState.shadowWarningImmediate) playImmediateAudio(audioState.shadowWarningImmediate, volume, rate);
+    else playSfx("shadowWarning", volume, rate);
+}
+
+function playQteSound(kind) {
+    if (!audioState.unlocked) return;
+    if (kind === "warning") return playImmediateAudio(audioState.qteWarningImmediate, 0.55, 1);
+    if (kind === "good") return playImmediateAudio(audioState.qteGoodImmediate, 0.50, 1);
+    if (kind === "great") return playImmediateAudio(audioState.qteGreatImmediate, 0.56, 1);
+    if (kind === "fail") return playImmediateAudio(audioState.qteFailImmediate, 0.52, 1);
+}
+
+function unlockAudio() {
+    if (audioState.unlocked) return;
+    audioState.unlocked = true;
+
+    // 必须在真实用户手势里主动 play 一次，才能可靠解锁 Chrome/WebView/iframe 的音频策略。
+    // 使用已经预加载的核心音效，静音播放后立刻暂停，不会让玩家听到多余声音。
+    const unlockCandidate = ["pistol", "dryFire", "pickup", "doorOpen"]
+        .map((name) => audioState.templates.get(name))
+        .find((a) => a && isAudioPlayable(a));
+    if (unlockCandidate) {
+        try {
+            const oldVolume = unlockCandidate.volume;
+            const oldMuted = unlockCandidate.muted;
+            unlockCandidate.muted = true;
+            unlockCandidate.volume = 0;
+            unlockCandidate.currentTime = 0;
+            const unlockPromise = unlockCandidate.play();
+            if (unlockPromise && unlockPromise.then) {
+                unlockPromise.then(() => {
+                    try {
+                        unlockCandidate.pause();
+                        unlockCandidate.currentTime = 0;
+                        unlockCandidate.muted = oldMuted;
+                        unlockCandidate.volume = oldVolume;
+                        console.info("[audio] unlocked");
+                    } catch (_) {}
+                }).catch((err) => {
+                    unlockCandidate.muted = oldMuted;
+                    unlockCandidate.volume = oldVolume;
+                    console.warn("[audio] unlock failed:", err && (err.name + ": " + err.message));
+                });
+            }
+        } catch (err) {
+            console.warn("[audio] unlock threw:", err);
+        }
+    }
+    audioState.chainsawIdle = createLocalPreloadedAudio("chainsaw_idle_user.wav", 0.10);
+    if (audioState.chainsawIdle) audioState.chainsawIdle.loop = true;
+    audioState.chainsawSweepAudio = createLocalPreloadedAudio("chainsaw_attack_user.wav", 0.20);
+    audioState.chainsawRageAudio = createLocalPreloadedAudio("chainsaw_attack_user.wav", 0.16);
+    if (audioState.chainsawRageAudio) audioState.chainsawRageAudio.loop = true;
+    // 玩家脚步直接使用用户提供的脚步样本：慢速四个样本用于走路，快速四个样本用于奔跑。
+    audioState.footstepWalkPool = ["walkStep1","walkStep2","walkStep3","walkStep4"]
+        .map((name) => (audioState.pools.get(name) || []).find(isAudioPlayable) || audioState.templates.get(name)).filter(isAudioPlayable);
+    audioState.footstepRunPool = ["runStep1","runStep2","runStep3","runStep4"]
+        .map((name) => (audioState.pools.get(name) || []).find(isAudioPlayable) || audioState.templates.get(name)).filter(isAudioPlayable);
+    audioState.stepTimer = 0;
+    audioState.stepWalkIndex = 0;
+    audioState.stepRunIndex = 0;
+    // 黑影需要立刻响应，因此继续使用包内预载提示。
+    audioState.shadowWarningImmediate = createLocalPreloadedAudio("shadow_warning.wav", 0.30);
+    // 雷鸣恢复为自然长轰鸣录音。提前加载三条变体，闪电真正亮起时随机播放其中一条。
+    audioState.thunderPool = [
+        createAudio("thunder1", false, 0.42),
+        createAudio("thunder2", false, 0.42),
+        createAudio("thunder3", false, 0.42)
+    ].filter(Boolean);
+    for (const thunderAudio of audioState.thunderPool) {
+        thunderAudio.preload = "auto";
+        try { thunderAudio.load(); } catch (_) {}
+    }
+    // QTE 必须和画面严格同步，全部提前加载到内存。
+    audioState.qteWarningImmediate = createLocalPreloadedAudio("qte_advertise.ogg", 0.55);
+    audioState.qteGoodImmediate = createLocalPreloadedAudio("qte_good_custom.ogg", 0.50);
+    audioState.qteGreatImmediate = createLocalPreloadedAudio("qte_great_custom.ogg", 0.56);
+    audioState.qteFailImmediate = createLocalPreloadedAudio("qte_fail_custom.ogg", 0.52);
+    // 传送门近距离环境声：使用用户提供音效截取的稳定短循环，实际响度按距离动态控制。
+    audioState.portalHum = createLocalPreloadedAudio("portal_hum.wav", 0);
+    if (audioState.portalHum) audioState.portalHum.loop = true;
+}
+function stopAudioNow(a) {
+    if (!a) return;
+    try {
+        a.__wantPlay = false;
+        a.pause();
+        a.currentTime = 0;
+    } catch (_) {}
+}
+
+function playChainsawSweepAudio() {
+    if (!audioState.unlocked || !audioState.chainsawSweepAudio) return;
+    playImmediateAudio(audioState.chainsawSweepAudio, 0.20, 1.0);
+}
+
+function startChainsawRageAudio() {
+    if (!audioState.unlocked || !audioState.chainsawRageAudio) return;
+    stopAudioNow(audioState.chainsawSweepAudio);
+    try {
+        const a = audioState.chainsawRageAudio;
+        a.pause();
+        a.currentTime = 0;
+        a.loop = true;
+        a.volume = 0.16;
+        requestAudioPlay(a);
+    } catch (_) {}
+}
+
+function stopChainsawRageAudio() {
+    stopAudioNow(audioState.chainsawRageAudio);
+}
+
+function playSfx(name, volume = 0.25, rate = 1) {
+    if (!audioState.unlocked || !audioState.readyNames.has(name)) return false;
+    const pool = audioState.pools.get(name) || [];
+    let a = pool.find(item => isAudioPlayable(item) && (item.paused || item.ended));
+    if (!a) {
+        const template = audioState.templates.get(name);
+        if (isAudioPlayable(template)) a = template;
+    }
+    if (!isAudioPlayable(a)) return false;
+    try {
+        a.pause();
+        a.currentTime = 0;
+        a.loop = false;
+        a.volume = clamp(volume, 0, 1);
+        a.playbackRate = clamp(rate, 0.72, 1.40);
+        return requestAudioPlay(a);
+    } catch (_) { return false; }
+}
+
+function updatePortalProximityAudio() {
+    const a = audioState.portalHum;
+    if (!a) return;
+    const room = maze.portal ? maze.rooms[maze.portal.roomId] : null;
+    const roomOpened = !!(room && room.door && room.door.open);
+    const maxDistance = maze.tileSize * 3;
+    const distance = maze.portal ? Math.hypot(maze.portal.x - player.x, maze.portal.y - player.y) : Infinity;
+    const audible = roomOpened && distance < maxDistance && !sceneState.dead && !controlState.uiPaused;
+    if (!audible) {
+        if (!a.paused) a.pause();
+        return;
+    }
+    const near = clamp(1 - distance / maxDistance, 0, 1);
+    // 三格边缘几乎听不到，越靠近传送门越明显，但最高音量仍控制得比较克制。
+    a.volume = clamp(0.012 + Math.pow(near, 1.35) * 0.17, 0, 0.19);
+    if (a.paused) requestAudioPlay(a);
+}
+
+function updateAudio(dt) {
+    if (!audioState.unlocked) return;
+    updatePortalProximityAudio();
+    const chainsawSwinging = weaponState.meleeAnim && weaponState.meleeAnim.weapon === "chainsaw";
+    const shouldChainsawHum = !sceneState.dead && weaponState.current === "chainsaw" && !weaponState.chainsawRage && !weaponState.triggerDown && !chainsawSwinging;
+    if (audioState.chainsawIdle) {
+        if (shouldChainsawHum && audioState.chainsawIdle.paused) requestAudioPlay(audioState.chainsawIdle);
+        if (!shouldChainsawHum && !audioState.chainsawIdle.paused) {
+            audioState.chainsawIdle.__wantPlay = false;
+            audioState.chainsawIdle.pause();
+        }
+    }
+    if ((sceneState.dead || weaponState.current !== "chainsaw") && audioState.chainsawSweepAudio && !audioState.chainsawSweepAudio.paused) stopAudioNow(audioState.chainsawSweepAudio);
+    if ((sceneState.dead || !weaponState.chainsawRage) && audioState.chainsawRageAudio && !audioState.chainsawRageAudio.paused) stopChainsawRageAudio();
+    const shouldPlayerFootsteps = player.actualMoving && !player.dash && !weaponState.chainsawRage && !sceneState.dead;
+    const activeStepPool = player.running ? audioState.footstepRunPool : audioState.footstepWalkPool;
+    if (shouldPlayerFootsteps && activeStepPool.length) {
+        audioState.stepTimer -= dt;
+        if (audioState.stepTimer <= 0) {
+            const indexKey = player.running ? "stepRunIndex" : "stepWalkIndex";
+            const step = activeStepPool[audioState[indexKey]++ % activeStepPool.length];
+            playImmediateAudio(step, player.running ? 1.0 : 0.9, player.running ? random(0.98,1.03) : random(0.98,1.02));
+            audioState.stepTimer = player.running ? random(0.24,0.29) : random(0.50,0.58);
+        }
+    } else {
+        audioState.stepTimer = 0;
+    }
+    if (!sceneState.dead) {
+        if (audioState.dripSequenceRemaining > 0) {
+            audioState.dripSequenceTimer -= dt;
+            if (audioState.dripSequenceTimer <= 0) {
+                playSfx("drip", random(0.045, 0.075), random(0.90, 1.08));
+                audioState.dripSequenceRemaining--;
+                audioState.dripSequenceTimer = audioState.dripSequenceRemaining > 0 ? random(0.38, 1.20) : 0;
+                if (audioState.dripSequenceRemaining <= 0) audioState.dripTimer = random(90, 240);
+            }
+        } else {
+            audioState.dripTimer -= dt;
+            if (audioState.dripTimer <= 0) {
+                // 大多数只滴一下，偶尔两下，极少三下。
+                const r = Math.random();
+                audioState.dripSequenceRemaining = r < 0.72 ? 1 : r < 0.94 ? 2 : 3;
+                audioState.dripSequenceTimer = 0;
+            }
+        }
+    }
+    audioState.monsterRustleTimer -= dt;
+    if (audioState.monsterRustleTimer <= 0 && !sceneState.dead) {
+        let nearest = null;
+        let nearestDistance = Infinity;
+        const maxDistance = maze.tileSize * 2.0;
+        const frontHalfAngle = Math.PI * 0.35;
+        for (const monster of monsters) {
+            const dx = monster.x - player.x;
+            const dy = monster.y - player.y;
+            const distance = Math.hypot(dx, dy);
+            if (distance >= nearestDistance || distance > maxDistance) continue;
+            // 只听得到玩家视线前方两格内、且没有隔墙的怪物窸窣声。
+            const angleToMonster = Math.atan2(dy, dx);
+            if (Math.abs(normalizeAngle(angleToMonster - aim.angle)) > frontHalfAngle) continue;
+            if (!hasLineOfSight(player.x, player.y, monster.x, monster.y)) continue;
+            if (monster.state === "idle" || (monster.state === "patrol" && monster.wait > 0)) continue;
+            nearest = monster;
+            nearestDistance = distance;
+        }
+        if (nearest) {
+            const closeness = 1 - clamp(nearestDistance / maxDistance, 0, 1);
+            playSfx("monsterRustle", 0.012 + closeness * 0.040, random(0.84, 1.08));
+            audioState.monsterRustleTimer = random(0.72, 1.38);
+        } else audioState.monsterRustleTimer = random(0.30, 0.65);
+    }
+}
+
+// 首次进入的关键资源由底部 startInitialResourceLoading() 统一控制；后期音效进入游戏后再异步加载。
+
+// 高清展示。手机端单独限制像素倍率，避免高 DPR 设备每帧绘制过量像素。
+let mobileRenderEnabled = false;
+let resizeCanvasRaf = 0;
+let lastCanvasWidth = 0;
+let lastCanvasHeight = 0;
+let lastCanvasDpr = 0;
+
+function getWorldRenderScale() {
+    // 手机横屏需要看到更多场景；只缩放世界层，HUD/按钮仍保持正常触摸尺寸。
+    return mobileRenderEnabled ? 0.72 : 1;
+}
+function getWorldViewportWidth() { return window.innerWidth / getWorldRenderScale(); }
+function getWorldViewportHeight() { return window.innerHeight / getWorldRenderScale(); }
+function worldToScreenX(x) { return (x - camera.x) * getWorldRenderScale(); }
+function worldToScreenY(y) { return (y - camera.y) * getWorldRenderScale(); }
+
+function resizeCanvas(force = false) {
+    const width = Math.max(1, window.innerWidth);
+    const height = Math.max(1, window.innerHeight);
+    const rawDpr = window.devicePixelRatio || 1;
+    const dpr = mobileRenderEnabled ? Math.min(rawDpr, 1.20) : rawDpr;
+    if (!force && width === lastCanvasWidth && height === lastCanvasHeight && Math.abs(dpr - lastCanvasDpr) < 0.01) return;
+    lastCanvasWidth = width;
+    lastCanvasHeight = height;
+    lastCanvasDpr = dpr;
     game.style.width = width + "px";
     game.style.height = height + "px";
-    game.width = width * dpr;
-    game.height = height * dpr;
+    game.width = Math.round(width * dpr);
+    game.height = Math.round(height * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     visionCanvas.width = width;
     visionCanvas.height = height;
 }
+function scheduleResizeCanvas() {
+    if (resizeCanvasRaf) return;
+    resizeCanvasRaf = requestAnimationFrame(() => {
+        resizeCanvasRaf = 0;
+        resizeCanvas();
+    });
+}
 
-resizeCanvas();
-window.addEventListener("resize", resizeCanvas);
+resizeCanvas(true);
+window.addEventListener("resize", scheduleResizeCanvas);
 game.style.cursor = "none";
 
 // 鼠标与准星
@@ -134,6 +704,7 @@ const player = {
     speed: 220,
     runSpeed: 340,
     moving: false,
+    actualMoving: false,
     running: false,
     walkTime: 0,
     radius: 14,
@@ -155,7 +726,9 @@ const player = {
     maxShields: 2,
     fireSlowTime: 0,
     monsterSlowTime: 0,
-    phaseDashCooldown: 0
+    phaseDashCooldown: 0,
+    staminaRunLocked: false,
+    damageInvuln: 0
 };
 
 // 武器与子弹
@@ -166,6 +739,7 @@ const weaponState = {
     triggerDown: false,
     fireTimer: 0,
     reloadTimer: 0,
+    reloadSoundStage: 0,
     reloading: false,
     rifleBurst: 0,
     rifleReset: 0,
@@ -213,13 +787,13 @@ const weapons = {
         mag: 0,
         reserve: 0,
         reload: 0.58,
-        interval: 0.72,
+        interval: 1.45,
         damage: 13,
         speed: 900,
         noise: 660
     },
-    katana: {name: "武士刀", type: "melee", durability: 10, maxDurability: 10, interval: 0.72, damage: 50, noise: 55},
-    chainsaw: {name: "电锯", type: "melee", durability: 30, maxDurability: 30, interval: 0.32, damage: 999, noise: 820}
+    katana: {name: "武士刀", type: "melee", durability: 10, maxDurability: 10, interval: 0.34, damage: 50, noise: 55},
+    chainsaw: {name: "电锯", type: "melee", durability: 30, maxDurability: 30, interval: 0.68, damage: 999, noise: 820}
 };
 
 // 视野
@@ -258,7 +832,11 @@ const monsterSpawner = {
     interval: 4.5,
     max: 30,
     hordeMax: 200,
-    minPlayerDistance: 450
+    minPlayerDistance: 450,
+    // 暴露模式下，同一小段时间从同一张地图边缘形成“怪潮入口”，
+    // 让怪物尽量汇成一股追击流，而不是从玩家四周同时包夹。
+    hordeSpawnAnchor: null,
+    hordeSpawnAnchorTimer: 0
 };
 
 // 陷阱与画面反馈
@@ -270,12 +848,18 @@ const danger = {
     blackout: 0
 };
 const thunder = {
-    cooldown: random(12, 24),
+    cooldown: 0,
+    reason: "time",
     active: false,
     elapsed: 0,
     duration: 0,
     flashes: [],
-    flashAlpha: 0
+    flashAlpha: 0,
+    faceAfterglow: 0,
+    soundPlayed: false,
+    lastSoundAt: -999,
+    glowX: 0.5,
+    glowY: 0.24
 };
 const feedback = {
     damageAlpha: 0,
@@ -284,9 +868,20 @@ const feedback = {
 };
 const notices = [];
 
-function showNotice(text, type = "normal") {
-    notices.push({text, type, life: 1.15, maxLife: 1.15, offset: 0});
+function showNotice(text, type = "normal", duration = 1.15) {
+    const life = Math.max(0.35, duration);
+    notices.push({text, type, life, maxLife: life, offset: 0});
     if (notices.length > 4) notices.shift();
+}
+
+function heldGemCount() {
+    return Number(!!player.gems.red) + Number(!!player.gems.yellow) + Number(!!player.gems.blue);
+}
+
+function showGemPickupGuide(color) {
+    const colorName = ({red: "红色", yellow: "黄色", blue: "蓝色"})[color] || "";
+    showNotice("获得" + colorName + "宝石！", "gem", 3.35);
+    showNotice("前往小地图紫色标记处，激活传送门逃离此地", "portalGuide", 3.35);
 }
 
 function updateNotices(dt) {
@@ -310,7 +905,11 @@ function drawNotices() {
         ctx.lineWidth = 4;
         ctx.strokeStyle = "rgba(0,0,0,0.9)";
         ctx.strokeText(notice.text, window.innerWidth / 2, y);
-        ctx.fillStyle = notice.type === "warn" ? "#ff8a8a" : notice.type === "good" ? "#9dff9d" : "white";
+        ctx.fillStyle = notice.type === "warn" ? "#ff8a8a"
+            : notice.type === "good" ? "#9dff9d"
+            : notice.type === "gem" ? "#ffd877"
+            : notice.type === "portalGuide" ? "#dcbcff"
+            : "white";
         ctx.fillText(notice.text, window.innerWidth / 2, y);
     }
     ctx.restore();
@@ -371,7 +970,38 @@ const sceneState = {
     sceneCoins: 0,
     bankedCoins: loadBankedCoins()
 };
+
+// “导演层”：核心玩法不变，只负责一局的阶段、监管者、灵异事件和感知误导。
+const director = {
+    elapsed: 0,
+    timeDifficulty: 0,       // 连续 0~10
+    gemDifficulty: 0,        // 0~3，与时间难度独立
+    collectedGems: new Set(),
+    timeBand: 0,
+    bandThunderDone: false,
+    bandThunderAt: random(0.50, 0.75),
+    eventCooldown: random(28, 42),
+    flashlightOff: 0,
+    flashlightFlicker: 0,
+    flashlightFlickerDuration: 0,
+    flashlightOffPending: 0,
+    radarGlitch: 0,
+    radarGlitchSeed: 0,
+    phantoms: [],
+    exposure: {active: false, time: 0, duration: 2.15, source: ""},
+    lowHealthTimer: 0,
+    lowHealthThunderTimer: random(10, 18),
+    lastAimAngle: 0,
+    aimMotion: 0
+};
 const monsterExplosionEffects = [];
+const skillEffects = [];
+const monsterManager = {
+    attackCooldown: 0,
+    attackGap: 0.32,
+    pathBudget: 8,
+    maxPathBudget: 8
+};
 const deathUi = { button: { x: 0, y: 0, w: 220, h: 54 } };
 const cameraFx = {
     flyTime: 0,
@@ -380,8 +1010,47 @@ const cameraFx = {
     startOffsetY: 0
 };
 
+// 控制模式：每次浏览器刷新后由独立的 mobile_controls.js 弹出一次选择。
+// 传送门换场景与死亡重开不会重新询问。
+const controlState = {
+    mode: "select",
+    uiPaused: false
+};
+const mobileInput = {
+    moveX: 0,
+    moveY: 0,
+    run: false,
+    aimDistance: 250
+};
+
+function isMobileControls() {
+    return controlState.mode === "mobile";
+}
+
+function setControlMode(mode) {
+    controlState.mode = mode === "mobile" ? "mobile" : "keyboard";
+    controlState.uiPaused = false;
+    mobileRenderEnabled = controlState.mode === "mobile";
+    // 手机端进一步降低转向响应；瞄准距离由右侧触摸拖动长度决定，不再永远顶到手电最远端。
+    aim.turnSpeed = mobileRenderEnabled ? 3.0 : 14;
+    monsterManager.maxPathBudget = mobileRenderEnabled ? 4 : 8;
+    mobileInput.moveX = 0;
+    mobileInput.moveY = 0;
+    mobileInput.run = false;
+    mobileInput.aimDistance = Math.min(250, crosshair.maxDistance);
+    keys.clear();
+    weaponState.triggerDown = false;
+    crosshair.targetScale = 1;
+    game.style.cursor = "none";
+    resizeCanvas(true);
+    updateCamera();
+    unlockAudio();
+}
+
 // 键盘
 window.addEventListener("keydown", (e) => {
+    if (controlState.mode !== "keyboard") return;
+    unlockAudio();
     const key = e.key.toLowerCase();
     if (sceneState.dead) {
         e.preventDefault();
@@ -399,6 +1068,7 @@ window.addEventListener("keydown", (e) => {
     if (key === "q" && !e.repeat) toggleWeapon();
 });
 window.addEventListener("keyup", (e) => {
+    if (controlState.mode !== "keyboard") return;
     const key = e.key.toLowerCase();
     if (!blockKeys.has(key)) {
         e.preventDefault();
@@ -410,6 +1080,7 @@ window.addEventListener("keyup", (e) => {
 
 // 鼠标
 function updateMousePosition(e) {
+    if (controlState.mode !== "keyboard") return;
     const rect = game.getBoundingClientRect();
     mouse.x = e.clientX - rect.left;
     mouse.y = e.clientY - rect.top;
@@ -421,6 +1092,8 @@ game.addEventListener("contextmenu", (e) => e.preventDefault());
 game.addEventListener("wheel", (e) => e.preventDefault(), {passive: false});
 game.addEventListener("mousemove", updateMousePosition);
 game.addEventListener("mousedown", (e) => {
+    if (controlState.mode !== "keyboard") return;
+    unlockAudio();
     game.focus({preventScroll: true});
     if (e.button === 2) {
         if (trapQte.active) resolveTrapQte();
@@ -437,13 +1110,14 @@ game.addEventListener("mousedown", (e) => {
     }
     crosshair.targetScale = 1.3;
     weaponState.triggerDown = true;
-    weaponState.fireTimer = 0;
     tryAttack(true);
 });
 window.addEventListener("mouseup", (e) => {
+    if (controlState.mode !== "keyboard") return;
     if (e.button === 0) {
         crosshair.targetScale = 1;
         weaponState.triggerDown = false;
+        if (weaponState.current === "chainsaw" && !weaponState.chainsawRage) stopAudioNow(audioState.chainsawSweepAudio);
     }
 });
 
@@ -478,8 +1152,8 @@ function lerpAngle(current, target, amount) {
 
 function getPlayerScreenPosition() {
     return {
-        x: player.x - camera.x,
-        y: player.y - camera.y
+        x: worldToScreenX(player.x),
+        y: worldToScreenY(player.y)
     };
 }
 
@@ -558,23 +1232,28 @@ function generateMaze() {
     player.y = spawn.y;
     player.stamina = player.maxStamina;
     player.phaseDashCooldown = 0;
+    player.staminaRunLocked = false;
+    player.damageInvuln = 0;
     player.keys = 0;
     player.gems = {red: false, yellow: false, blue: false};
     player.exploredRooms = new Set();
     player.exploredTiles = new Set();
     // 分身、护盾等玩家状态跨场景保留；传送门交互本身会解除隐身。
     // 每个场景的基础钥匙数量固定为“房间数 + 3”，确保钥匙总量始终高于房间数量。
-    createRandomItems("key", maze.rooms.length + 3, 250);
+    createDistributedKeys(maze.rooms.length + 3, 250);
     createRandomItems("medkit", 4, 300);
     populateSpecialRooms();
     generateLamps();
     sceneState.timer = 480;
     sceneState.horde = false;
     sceneState.sceneCoins = 0;
+    resetDirectorForScene();
     resetSceneVisualState();
     monsterSpawner.interval = 4.5;
     monsterSpawner.max = 30;
     monsterSpawner.timer = 2.5;
+    monsterSpawner.hordeSpawnAnchor = null;
+    monsterSpawner.hordeSpawnAnchorTimer = 0;
 }
 
 
@@ -1187,6 +1866,50 @@ function createRandomItems(type, count, minDistanceFromPlayer) {
     }
 }
 
+function createDistributedKeys(count, minDistanceFromPlayer = 0) {
+    const candidates = [];
+    const seen = new Set();
+    for (let row = 1; row < maze.rows - 1; row++) {
+        for (let col = 1; col < maze.cols - 1; col++) {
+            if (!isWalkableTile(col, row) || maze.roomGrid[row][col] !== -1) continue;
+            const point = tileCenter(col, row);
+            if (minDistanceFromPlayer > 0 && Math.hypot(point.x - player.x, point.y - player.y) < minDistanceFromPlayer) continue;
+            let nearestRoom = Infinity;
+            for (const room of maze.rooms) nearestRoom = Math.min(nearestRoom, Math.hypot(point.x - room.center.x, point.y - room.center.y));
+            if (nearestRoom > maze.tileSize * 4.2) continue;
+            const key = col + "," + row;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            candidates.push({x: point.x, y: point.y, col, row, roomDistance: nearestRoom});
+        }
+    }
+    const chosen = [];
+    while (chosen.length < count && candidates.length) {
+        let bestIndex = -1;
+        let bestScore = -Infinity;
+        for (let i = 0; i < candidates.length; i++) {
+            const c = candidates[i];
+            let separation = maze.tileSize * 20;
+            for (const prev of chosen) separation = Math.min(separation, Math.hypot(c.x - prev.x, c.y - prev.y));
+            const score = separation - c.roomDistance * 0.18 + Math.random() * maze.tileSize * 0.8;
+            if (score > bestScore) { bestScore = score; bestIndex = i; }
+        }
+        if (bestIndex < 0) break;
+        const selected = candidates.splice(bestIndex, 1)[0];
+        chosen.push(selected);
+        maze.items.push({type: "key", x: selected.x, y: selected.y, collected: false});
+        for (let i = candidates.length - 1; i >= 0; i--) {
+            if (candidates[i].col === selected.col && candidates[i].row === selected.row) candidates.splice(i, 1);
+        }
+    }
+    while (chosen.length < count) {
+        const point = randomFloorPosition(minDistanceFromPlayer);
+        if (chosen.some((k) => Math.hypot(k.x - point.x, k.y - point.y) < maze.tileSize * 1.2)) continue;
+        chosen.push(point);
+        maze.items.push({type: "key", x: point.x, y: point.y, collected: false});
+    }
+}
+
 function generateLamps() {
     const used = [];
     for (let row = 1; row < maze.rows - 1; row++) {
@@ -1263,15 +1986,23 @@ function populateSpecialRooms() {
         room.primaryLoot = null;
         room.isRepairRoom = false;
         room.isGemRoom = false;
+        room.type = room.door.content === "trap" ? "trap" : "ruin";
+        room.decorations = [];
+        room.ruinShadow = null;
+        room.door.fakeMedicalIllusion = false;
     }
+
     const eligible = maze.rooms.filter((room) => room.door.content !== "trap");
     const gemRooms = chooseFarRooms(3, eligible);
     const colors = ["red", "yellow", "blue"];
     gemRooms.forEach((room, i) => {
         room.isGemRoom = true;
+        room.type = "gem";
         placeRoomItem(room, "gem", {gemColor: colors[i]});
     });
+
     const portalRoom = eligible.find((room) => !gemRooms.includes(room)) || maze.rooms[maze.rooms.length - 1];
+    if (portalRoom) portalRoom.type = "portal";
     maze.portal = {
         x: portalRoom.center.x,
         y: portalRoom.center.y,
@@ -1280,42 +2011,70 @@ function populateSpecialRooms() {
         visibleOnRadar: false,
         inserted: {red: false, yellow: false, blue: false}
     };
-    let remaining = eligible.filter((room) => !gemRooms.includes(room) && room !== portalRoom);
-    const pool = [];
-    if (Math.random() < 0.45) pool.push("rifle");
-    if (Math.random() < 0.40) pool.push("shotgun");
-    if (Math.random() < 0.33) pool.push("katana");
-    if (Math.random() < 0.26) pool.push("chainsaw");
-    if (Math.random() < 0.68) pool.push("rifleAmmo");
-    if (Math.random() < 0.58) pool.push("shotgunAmmo");
-    if (Math.random() < 0.34) pool.push(Math.random() < 0.58 ? "rifleAmmo" : "shotgunAmmo");
-    shuffle(pool);
+
+    let remaining = shuffle(eligible.filter((room) => !gemRooms.includes(room) && room !== portalRoom));
     const spawnedMelee = [];
-    for (const type of pool) {
+
+    // 军械房不是每局必有，但一旦抽到武器，这间房就拥有明确身份。
+    const weaponPool = [];
+    if (Math.random() < 0.62) weaponPool.push("rifle");
+    if (Math.random() < 0.55) weaponPool.push("shotgun");
+    if (Math.random() < 0.42) weaponPool.push("katana");
+    if (Math.random() < 0.31) weaponPool.push("chainsaw");
+    shuffle(weaponPool);
+    for (const type of weaponPool.slice(0, 3)) {
         const room = remaining.shift();
         if (!room) break;
-        if (type === "rifle" || type === "shotgun") placeRoomItem(room, type, {weaponMag: weapons[type].magSize});
-        else placeRoomItem(room, type);
-        if (type === "katana" || type === "chainsaw") spawnedMelee.push(type);
-    }
-    let repairTargets = [];
-    if (spawnedMelee.includes("katana")) repairTargets.push("whetstone");
-    if (spawnedMelee.includes("chainsaw")) repairTargets.push("oil");
-    while (repairTargets.length < 2 && repairTargets.length > 0 && Math.random() < 0.45) repairTargets.push(repairTargets[0]);
-    repairTargets = repairTargets.slice(0, 2);
-    for (const type of repairTargets) {
-        const room = remaining.shift();
-        if (!room) break;
-        room.isRepairRoom = true;
-        placeRoomItem(room, type, {uses: 0, cooldown: 0});
-    }
-    for (const room of maze.rooms) {
-        if (!room.isRepairRoom && Math.random() < 0.30) addRoomItem(room, "medkit");
-        if (Math.random() < 0.44) addRoomItem(room, "coin", {amount: 1 + Math.floor(Math.random() * 10)});
-        if (room.door.content === "trap" && Math.random() < 0.48) {
-            const trapLoot = Math.random() < 0.58 ? "rifleAmmo" : Math.random() < 0.82 ? "shotgunAmmo" : "key";
-            addRoomItem(room, trapLoot);
+        room.type = "armory";
+        if (type === "rifle" || type === "shotgun") {
+            placeRoomItem(room, type, {weaponMag: weapons[type].magSize});
+            if (Math.random() < 0.78) addRoomItem(room, type === "rifle" ? "rifleAmmo" : "shotgunAmmo");
+        } else {
+            placeRoomItem(room, type);
+            spawnedMelee.push(type);
         }
+        if (Math.random() < 0.55) addRoomItem(room, Math.random() < 0.55 ? "rifleAmmo" : "shotgunAmmo");
+    }
+
+    // 维修房与近战武器严格承兑：出现对应近战武器，就保证至少有对应维修资源。
+    for (const melee of spawnedMelee) {
+        const room = remaining.shift();
+        if (!room) break;
+        room.type = "repair";
+        room.isRepairRoom = true;
+        placeRoomItem(room, melee === "katana" ? "whetstone" : "oil", {uses: 0, cooldown: 0});
+    }
+
+    // 医疗房：门具有明确识别标记。
+    if (remaining.length && Math.random() < 0.86) {
+        const room = remaining.shift();
+        room.type = "medical";
+        placeRoomItem(room, "medkit");
+        if (Math.random() < 0.58) addRoomItem(room, "shield");
+        if (Math.random() < 0.18) addRoomItem(room, Math.random() < 0.5 ? "stealthPotion" : "clonePotion");
+    }
+
+    // 储藏/补给房：偏向钥匙、弹药、金币。
+    if (remaining.length && Math.random() < 0.78) {
+        const room = remaining.shift();
+        room.type = "supply";
+        if (Math.random() < 0.74) addRoomItem(room, Math.random() < 0.58 ? "rifleAmmo" : "shotgunAmmo");
+        if (Math.random() < 0.58) addRoomItem(room, "key");
+        if (Math.random() < 0.72) addRoomItem(room, "coin", {amount: 1 + Math.floor(Math.random() * 10)});
+    }
+
+    for (const room of maze.rooms) {
+        if (room.type === "ruin") {
+            if (Math.random() < 0.34) room.decorations.push({type: "bones", ...getRoomRandomPoint(room, 24), angle: random(-0.35,0.35)});
+            if (Math.random() < 0.18) room.ruinShadow = {x: room.center.x + random(-24,24), y: room.center.y + random(-24,24), active: true, moving: false, life: 1, vx: 0, vy: 0};
+            if (Math.random() < 0.12) addRoomItem(room, Math.random() < 0.60 ? "coin" : "medkit", {amount: 1 + Math.floor(Math.random() * 6)});
+        }
+        if (room.type === "trap") {
+            if (Math.random() < 0.52) addRoomItem(room, Math.random() < 0.56 ? "rifleAmmo" : Math.random() < 0.80 ? "shotgunAmmo" : "key");
+            if (Math.random() < 0.26) addRoomItem(room, "coin", {amount: 1 + Math.floor(Math.random() * 10)});
+        }
+        if (!["repair", "medical", "armory", "supply", "gem", "portal"].includes(room.type) && Math.random() < 0.20) addRoomItem(room, "medkit");
+        if (Math.random() < 0.42) addRoomItem(room, "coin", {amount: 1 + Math.floor(Math.random() * 10)});
     }
 }
 
@@ -1367,8 +2126,10 @@ function hasLineOfSight(x1, y1, x2, y2) {
 function updateCamera() {
     const mapWidth = maze.cols * maze.tileSize;
     const mapHeight = maze.rows * maze.tileSize;
-    let baseX = clamp(player.x - window.innerWidth / 2, 0, Math.max(0, mapWidth - window.innerWidth));
-    let baseY = clamp(player.y - window.innerHeight / 2, 0, Math.max(0, mapHeight - window.innerHeight));
+    const viewWidth = getWorldViewportWidth();
+    const viewHeight = getWorldViewportHeight();
+    let baseX = clamp(player.x - viewWidth / 2, 0, Math.max(0, mapWidth - viewWidth));
+    let baseY = clamp(player.y - viewHeight / 2, 0, Math.max(0, mapHeight - viewHeight));
     if (cameraFx.flyTime > 0) {
         const t = 1 - cameraFx.flyTime / cameraFx.flyDuration;
         const ease = 1 - Math.pow(1 - t, 3);
@@ -1382,15 +2143,20 @@ function updateCamera() {
 
 function updateAim(dt) {
     const screen = getPlayerScreenPosition();
-    const dx = mouse.x - screen.x;
-    const dy = mouse.y - screen.y;
-    const distance = Math.hypot(dx, dy);
-    if (distance >= aim.deadZone) aim.targetAngle = Math.atan2(dy, dx);
+    let targetDistance;
+    if (isMobileControls()) {
+        targetDistance = clamp(mobileInput.aimDistance, crosshair.minDistance, crosshair.maxDistance);
+    } else {
+        const dx = mouse.x - screen.x;
+        const dy = mouse.y - screen.y;
+        const distance = Math.hypot(dx, dy);
+        if (distance >= aim.deadZone) aim.targetAngle = Math.atan2(dy, dx);
+        targetDistance = Math.min(distance, crosshair.maxDistance);
+        if (!mouse.allowNear && targetDistance < crosshair.minDistance) targetDistance = crosshair.minDistance;
+    }
     const turnAmount = 1 - Math.exp(-aim.turnSpeed * dt);
     aim.angle = lerpAngle(aim.angle, aim.targetAngle, turnAmount);
-    let targetDistance = Math.min(distance, crosshair.maxDistance);
-    if (!mouse.allowNear && targetDistance < crosshair.minDistance) targetDistance = crosshair.minDistance;
-    const distanceAmount = 1 - Math.exp(-20 * dt);
+    const distanceAmount = 1 - Math.exp(-(isMobileControls() ? 8 : 20) * dt);
     crosshair.distance += (targetDistance - crosshair.distance) * distanceAmount;
     crosshair.x = screen.x + Math.cos(aim.angle) * crosshair.distance;
     crosshair.y = screen.y + Math.sin(aim.angle) * crosshair.distance;
@@ -1431,20 +2197,25 @@ function getVisionAngle() {
 
 function damagePlayer(amount, source = "") {
     if (amount <= 0) return;
+    if (source === "monster" && player.damageInvuln > 0) return;
     if (player.shields > 0) {
         player.shields--;
+        playSfx("shield", 0.14, 1);
         feedback.damageAlpha = Math.max(feedback.damageAlpha, 0.25);
         feedback.damagePulse = 1;
         feedback.shake = Math.max(feedback.shake, 0.35);
         showNotice("护盾抵挡伤害", "good");
+        if (source === "monster") player.damageInvuln = 0.58;
         return;
     }
     player.health = Math.max(0, player.health - amount);
+    playSfx("damage", 0.12, 1);
     player.hurtFlash = 1;
     feedback.damageAlpha = 1;
     feedback.damagePulse = 1;
     feedback.shake = 1;
     if (source === "monster") {
+        player.damageInvuln = 0.58;
         danger.blocked = true;
         danger.blackout = 0;
     }
@@ -1461,6 +2232,7 @@ function killPlayer() {
     player.dash = null;
     trapQte.active = false;
     trapQte.phase = "idle";
+    stopAudioNow(audioState.portalHum);
     keys.clear();
     game.style.cursor = "default";
 }
@@ -1570,19 +2342,569 @@ function getWeaponSpeedMultiplier() {
     return 1;
 }
 
+
+function resetDirectorForScene() {
+    director.elapsed = 0;
+    director.timeDifficulty = 0;
+    director.gemDifficulty = 0;
+    director.collectedGems = new Set();
+    director.timeBand = 0;
+    director.bandThunderDone = false;
+    director.bandThunderAt = random(0.50, 0.75);
+    director.eventCooldown = random(28, 42);
+    director.flashlightOff = 0;
+    director.flashlightFlicker = 0;
+    director.flashlightFlickerDuration = 0;
+    director.flashlightOffPending = 0;
+    director.radarGlitch = 0;
+    director.radarGlitchSeed = Math.random() * 1000;
+    director.phantoms = [];
+    director.exposure.active = false;
+    director.exposure.time = 0;
+    director.exposure.source = "";
+    director.lowHealthTimer = random(5, 9);
+    director.lowHealthThunderTimer = random(10, 18);
+    director.lastAimAngle = aim.angle;
+    director.aimMotion = 0;
+}
+
+function getTimeDifficulty01() {
+    return clamp(director.timeDifficulty / 10, 0, 1);
+}
+
+function getMonsterGemMultipliers() {
+    const g = clamp(director.gemDifficulty, 0, 3);
+    return {
+        visual: 1 + g * 0.08,
+        chase: 1 + g * 0.10,
+        speed: 1 + g * 0.065,
+        attackSpeed: 1 + g * 0.12
+    };
+}
+
+function isPlayerInCombatForDirector() {
+    if (sceneState.horde || trapQte.active) return true;
+    return monsters.some((m) => {
+        if (!["chase", "attack", "frenzy"].includes(m.state)) return false;
+        if (m.chaseTarget && m.chaseTarget !== player) return false;
+        return Math.hypot(m.x - player.x, m.y - player.y) < maze.tileSize * 7;
+    });
+}
+
+function isWorldPointOnScreen(x, y, margin = 50) {
+    const sx = x - camera.x, sy = y - camera.y;
+    return sx >= -margin && sy >= -margin && sx <= getWorldViewportWidth() + margin && sy <= getWorldViewportHeight() + margin;
+}
+
+function isHiddenMutationTile(col, row) {
+    if (!isInsideMap(col, row)) return false;
+    const p = tileCenter(col, row);
+    if (isWorldPointOnScreen(p.x, p.y, 120) && isPointInsidePlayerFlashlight(p.x, p.y)) return false;
+    if (Math.hypot(p.x - player.x, p.y - player.y) < maze.tileSize * 3) return false;
+    if (maze.roomGrid[row][col] !== -1 || maze.doors.has(col + "," + row)) return false;
+    for (let yy = row - 1; yy <= row + 1; yy++) for (let xx = col - 1; xx <= col + 1; xx++) {
+        if (isInsideMap(xx, yy) && maze.roomGrid[yy][xx] !== -1) return false;
+    }
+    return true;
+}
+
+function canSafelyCloseCorridor(col, row) {
+    if (!isHiddenMutationTile(col, row) || maze.grid[row][col] !== 0) return false;
+    const neighbors = [[1,0],[-1,0],[0,1],[0,-1]].filter((d) => isWalkableTile(col+d[0], row+d[1]));
+    if (neighbors.length < 2) return false;
+    if (maze.items.some((it) => !it.collected && worldToTile(it.x,it.y).col === col && worldToTile(it.x,it.y).row === row)) return false;
+    if (monsters.some((m) => { const t=worldToTile(m.x,m.y); return t.col===col && t.row===row; })) return false;
+    maze.grid[row][col] = 1;
+    const start = [col + neighbors[0][0], row + neighbors[0][1]];
+    const targetSet = new Set(neighbors.slice(1).map((d) => (col+d[0])+","+(row+d[1])));
+    const q=[start], seen=new Set([start[0]+","+start[1]]); let head=0;
+    while (head<q.length && targetSet.size) {
+        const [x,y]=q[head++];
+        targetSet.delete(x+","+y);
+        for (const d of [[1,0],[-1,0],[0,1],[0,-1]]) {
+            const nx=x+d[0], ny=y+d[1], key=nx+","+ny;
+            if (!isWalkableTile(nx,ny) || seen.has(key)) continue;
+            seen.add(key); q.push([nx,ny]);
+        }
+    }
+    maze.grid[row][col] = 0;
+    return targetSet.size === 0;
+}
+
+function shiftHiddenRoomEntrance() {
+    const rooms = shuffle(maze.rooms.filter((room) => room && room.door && !room.door.open && ["ruin","supply","trap"].includes(room.type)));
+    for (const room of rooms) {
+        if (isWorldPointOnScreen(room.center.x, room.center.y, 160) && isPointInsidePlayerFlashlight(room.center.x, room.center.y)) continue;
+        let minCol=Infinity,maxCol=-Infinity,minRow=Infinity,maxRow=-Infinity;
+        for (const cell of room.cells) { minCol=Math.min(minCol,cell[0]); maxCol=Math.max(maxCol,cell[0]); minRow=Math.min(minRow,cell[1]); maxRow=Math.max(maxRow,cell[1]); }
+        const choices=[];
+        for (let col=minCol; col<=maxCol; col++) {
+            for (const pair of [[col,minRow-1,col,minRow-2],[col,maxRow+1,col,maxRow+2]]) {
+                const [dc,dr,oc,orow]=pair;
+                if (dc===room.door.x && dr===room.door.y) continue;
+                if (isWalkableTile(oc,orow) && isInsideMap(dc,dr) && maze.grid[dr][dc] === 1 && !maze.doors.has(dc+","+dr)) {
+                    const wp=tileCenter(dc,dr);
+                    if (Math.hypot(wp.x-player.x,wp.y-player.y) >= maze.tileSize*3 && !(isWorldPointOnScreen(wp.x,wp.y,120) && isPointInsidePlayerFlashlight(wp.x,wp.y))) choices.push({dc,dr});
+                }
+            }
+        }
+        for (let row=minRow; row<=maxRow; row++) {
+            for (const pair of [[minCol-1,row,minCol-2,row],[maxCol+1,row,maxCol+2,row]]) {
+                const [dc,dr,oc,orow]=pair;
+                if (dc===room.door.x && dr===room.door.y) continue;
+                if (isWalkableTile(oc,orow) && isInsideMap(dc,dr) && maze.grid[dr][dc] === 1 && !maze.doors.has(dc+","+dr)) {
+                    const wp=tileCenter(dc,dr);
+                    if (Math.hypot(wp.x-player.x,wp.y-player.y) >= maze.tileSize*3 && !(isWorldPointOnScreen(wp.x,wp.y,120) && isPointInsidePlayerFlashlight(wp.x,wp.y))) choices.push({dc,dr});
+                }
+            }
+        }
+        if (!choices.length) continue;
+        const next=choices[Math.floor(Math.random()*choices.length)];
+        const oldKey=room.door.x+","+room.door.y;
+        maze.grid[room.door.y][room.door.x]=1;
+        maze.doors.delete(oldKey);
+        room.door.x=next.dc; room.door.y=next.dr;
+        maze.grid[next.dr][next.dc]=2;
+        maze.doors.set(next.dc+","+next.dr,room.door);
+        if (Math.hypot(room.center.x-player.x,room.center.y-player.y) < maze.tileSize*7) playSfx("doorClose", .055, random(.78,.92));
+    return true;
+    }
+    return false;
+}
+
+function mutateHiddenMaze() {
+    const candidates=[];
+    for (let row=2; row<maze.rows-2; row++) for (let col=2; col<maze.cols-2; col++) {
+        if (!isHiddenMutationTile(col,row)) continue;
+        candidates.push([col,row]);
+    }
+    shuffle(candidates);
+    // 优先“移动一堵墙/突然多一条路”：开一个连接两个走廊的隐蔽墙，绝不会让地图失联。
+    if (Math.random() < 0.62) {
+        for (const [col,row] of candidates) {
+            if (maze.grid[row][col] !== 1) continue;
+            const h = isWalkableTile(col-1,row) && isWalkableTile(col+1,row);
+            const v = isWalkableTile(col,row-1) && isWalkableTile(col,row+1);
+            if (!h && !v) continue;
+            maze.grid[row][col] = 0;
+            return true;
+        }
+    }
+    // “路没了”只关闭有替代路线的普通走廊，保证核心目标仍可达。
+    for (const [col,row] of candidates) {
+        if (canSafelyCloseCorridor(col,row)) { maze.grid[row][col]=1; return true; }
+    }
+    return false;
+}
+
+function findPhantomPoint(minTiles = 2.5, maxTiles = 5.5, preferAim = true) {
+    for (let i=0;i<60;i++) {
+        const angle = preferAim ? aim.angle + random(-0.55,0.55) : random(-Math.PI,Math.PI);
+        const d = maze.tileSize * random(minTiles,maxTiles);
+        const x=player.x+Math.cos(angle)*d, y=player.y+Math.sin(angle)*d;
+        const t=worldToTile(x,y);
+        if (!isWalkableTile(t.col,t.row) || maze.roomGrid[t.row][t.col] >= 0) continue;
+        return tileCenter(t.col,t.row);
+    }
+    return null;
+}
+
+function getHallucinationRegionKey(x, y) {
+    const regionSize = maze.tileSize * 6;
+    return Math.floor(x / regionSize) + "," + Math.floor(y / regionSize);
+}
+
+function countLowHealthIllusionsInRegion(regionKey) {
+    let count = 0;
+    for (const p of director.phantoms) {
+        if (p.lowHealthIllusion && p.illusionRegionKey === regionKey && !p.breaking) count++;
+    }
+    for (const monster of monsters) {
+        if (monster.appearAsMedkit && monster.illusionRegionKey === regionKey) count++;
+    }
+    for (const room of maze.rooms) {
+        const door = room.door;
+        if (door && door.fakeMedicalIllusion && door.illusionRegionKey === regionKey) count++;
+    }
+    return count;
+}
+
+function isLowHealthIllusionSpawnHidden(x, y) {
+    const distance = Math.hypot(x - player.x, y - player.y);
+    if (distance < maze.tileSize * 2.2 || distance > maze.tileSize * 6.2) return false;
+    if (isPointInsidePlayerFlashlight(x, y)) return false;
+    return true;
+}
+
+function findLowHealthIllusionPoint() {
+    for (let i = 0; i < 80; i++) {
+        const angle = random(-Math.PI, Math.PI);
+        const distance = maze.tileSize * random(2.4, 6.0);
+        const x = player.x + Math.cos(angle) * distance;
+        const y = player.y + Math.sin(angle) * distance;
+        const tile = worldToTile(x, y);
+        if (!isWalkableTile(tile.col, tile.row)) continue;
+        const point = tileCenter(tile.col, tile.row);
+        if (!isLowHealthIllusionSpawnHidden(point.x, point.y)) continue;
+        const regionKey = getHallucinationRegionKey(point.x, point.y);
+        if (countLowHealthIllusionsInRegion(regionKey) >= 3) continue;
+        return {x: point.x, y: point.y, regionKey};
+    }
+    return null;
+}
+
+function spawnLowHealthPhantom(kind) {
+    const point = findLowHealthIllusionPoint();
+    if (!point) return false;
+    const phantom = {
+        kind,
+        x: point.x,
+        y: point.y,
+        life: 999,
+        maxLife: 999,
+        alpha: 1,
+        revealDistance: maze.tileSize * 2,
+        lowHealthIllusion: true,
+        illusionRegionKey: point.regionKey,
+        breaking: false
+    };
+    if (kind === "item") phantom.itemType = ["medkit", "key", "rifleAmmo", "shotgunAmmo"][Math.floor(Math.random() * 4)];
+    director.phantoms.push(phantom);
+    return true;
+}
+
+function spawnPhantom(kind) {
+    const p=findPhantomPoint(kind === "shadow" ? 3 : 2.2, kind === "shadow" ? 5 : 4.8, true);
+    if (!p) return false;
+    const phantom={kind,x:p.x,y:p.y,life:random(4.5,8),maxLife:8,alpha:1,revealDistance:maze.tileSize*2};
+    if (kind === "item") phantom.itemType=["medkit","key","rifleAmmo","shotgunAmmo"][Math.floor(Math.random()*4)];
+    director.phantoms.push(phantom);
+    return true;
+}
+
+function spawnCrossingShadow() {
+    const forward=maze.tileSize*2.35;
+    const side=maze.tileSize*1.45;
+    const fx=Math.cos(aim.angle), fy=Math.sin(aim.angle), rx=-fy, ry=fx;
+    director.phantoms.push({kind:"cross", x:player.x+fx*forward-rx*side, y:player.y+fy*forward-ry*side, vx:rx*maze.tileSize*1.85, vy:ry*maze.tileSize*1.85, life:2.05, maxLife:2.05, alpha:.94, revealDistance:0});
+    playImmediateShadowWarning(0.28, random(.92,1.02));
+}
+
+function triggerParanormalEvent() {
+    if (sceneState.horde || isPlayerInCombatForDirector()) return false;
+    const t=getTimeDifficulty01();
+    const pool=["radar","phantomItem","phantomMonster","shadow"];
+    if (t>0.18) pool.push("flashlight","phantomDoor");
+    if (t>0.32) { pool.push("maze"); if (director.aimMotion > 0.035) pool.push("cross","cross"); }
+    if (t>0.52) pool.push("phantomWall","maze","shadow","roomShift");
+    const event=pool[Math.floor(Math.random()*pool.length)];
+    if (event === "radar") { director.radarGlitch=random(2.5,5); director.radarGlitchSeed=Math.random()*1000; return true; }
+    if (event === "flashlight") {
+        director.flashlightFlickerDuration=random(.82,1.18);
+        director.flashlightFlicker=director.flashlightFlickerDuration;
+        director.flashlightOffPending=random(1.05,1.85);
+        return true;
+    }
+    if (event === "maze") return mutateHiddenMaze();
+    if (event === "roomShift") return shiftHiddenRoomEntrance();
+    if (event === "phantomItem") return spawnPhantom("item");
+    if (event === "phantomMonster") return spawnPhantom("monster");
+    if (event === "phantomDoor") return spawnPhantom("door");
+    if (event === "phantomWall") return spawnPhantom("wall");
+    if (event === "shadow") return spawnPhantom("shadow");
+    if (event === "cross") { spawnCrossingShadow(); return true; }
+    return false;
+}
+
+function updateLowHealthHallucinations(dt) {
+    if (sceneState.horde || player.health > player.maxHealth * 0.38) return;
+    director.lowHealthTimer -= dt;
+    if (director.lowHealthTimer > 0 || isPlayerInCombatForDirector()) return;
+    director.lowHealthTimer = random(8, 15);
+    if (Math.random() > 0.42 + getTimeDifficulty01() * 0.24) return;
+
+    const choices = ["monsterMedkit", "phantomItem", "phantomDoor", "phantomWall"];
+    if (Math.random() < 0.60) choices.push("trapMedical", "trapMedical");
+    shuffle(choices);
+
+    for (const choice of choices) {
+        if (choice === "monsterMedkit") {
+            const candidates = monsters.filter((m) => {
+                if (m.appearAsMedkit) return false;
+                if (!isLowHealthIllusionSpawnHidden(m.x, m.y)) return false;
+                const key = getHallucinationRegionKey(m.x, m.y);
+                return countLowHealthIllusionsInRegion(key) < 3;
+            });
+            if (candidates.length) {
+                const monster = candidates[Math.floor(Math.random() * candidates.length)];
+                monster.appearAsMedkit = true;
+                monster.illusionRegionKey = getHallucinationRegionKey(monster.x, monster.y);
+                return;
+            }
+        }
+        if (choice === "trapMedical") {
+            const traps = maze.rooms.filter((r) => {
+                if (r.type !== "trap" || !r.door || r.door.open || r.door.fakeMedicalIllusion) return false;
+                const point = tileCenter(r.door.x, r.door.y);
+                if (!isLowHealthIllusionSpawnHidden(point.x, point.y)) return false;
+                const key = getHallucinationRegionKey(point.x, point.y);
+                return countLowHealthIllusionsInRegion(key) < 3;
+            });
+            if (traps.length) {
+                const room = traps[Math.floor(Math.random() * traps.length)];
+                const point = tileCenter(room.door.x, room.door.y);
+                room.door.fakeMedicalIllusion = true;
+                room.door.illusionRegionKey = getHallucinationRegionKey(point.x, point.y);
+                return;
+            }
+        }
+        if (choice === "phantomItem" && spawnLowHealthPhantom("item")) return;
+        if (choice === "phantomDoor" && spawnLowHealthPhantom("door")) return;
+        if (choice === "phantomWall" && spawnLowHealthPhantom("wall")) return;
+    }
+}
+
+function updatePhantoms(dt) {
+    for (let i=director.phantoms.length-1;i>=0;i--) {
+        const p=director.phantoms[i];
+        const playerNear = p.revealDistance > 0 && Math.hypot(p.x-player.x,p.y-player.y) <= p.revealDistance;
+        if (p.kind === "shadow" && !p.warningPlayed && isPointInsidePlayerFlashlight(p.x,p.y)) {
+            p.warningPlayed = true;
+            playImmediateShadowWarning(0.30, random(.92,1.02));
+        }
+        if (p.lowHealthIllusion && !p.breaking) {
+            if (playerNear) {
+                p.breaking = true;
+                p.life = 0.22;
+                p.maxLife = 0.22;
+            }
+        } else p.life-=dt;
+        if (p.kind === "cross") { p.x += p.vx*dt; p.y += p.vy*dt; }
+        if (!p.lowHealthIllusion && playerNear) p.life=Math.min(p.life,0.18);
+        if (p.life<=0) director.phantoms.splice(i,1);
+    }
+    for (const room of maze.rooms) {
+        const sh=room.ruinShadow;
+        if (!sh || !sh.active || !room.door.open) continue;
+        if (!sh.moving && isPointInsidePlayerFlashlight(sh.x,sh.y)) {
+            sh.moving=true; sh.life=1.85;
+            const a=Math.atan2(sh.y-player.y,sh.x-player.x)+random(-.60,.60);
+            sh.vx=Math.cos(a)*maze.tileSize*1.90; sh.vy=Math.sin(a)*maze.tileSize*1.90;
+            playImmediateShadowWarning(0.30, random(.90,1.02));
+        }
+        if (sh.moving) { sh.x+=sh.vx*dt; sh.y+=sh.vy*dt; sh.life-=dt; if (sh.life<=0) sh.active=false; }
+    }
+}
+
+function updateDirector(dt) {
+    const aimDelta = Math.abs(normalizeAngle(aim.angle - director.lastAimAngle));
+    director.lastAimAngle = aim.angle;
+    director.aimMotion = Math.max(aimDelta, director.aimMotion * Math.exp(-dt * 8));
+    director.elapsed = 480 - sceneState.timer;
+    director.timeDifficulty = clamp(director.elapsed / 480 * 10, 0, 10);
+    if (director.flashlightFlicker > 0) {
+        director.flashlightFlicker=Math.max(0,director.flashlightFlicker-dt);
+        if (director.flashlightFlicker <= 0 && director.flashlightOffPending > 0) {
+            director.flashlightOff=director.flashlightOffPending;
+            director.flashlightOffPending=0;
+        }
+    } else if (director.flashlightOff > 0) director.flashlightOff=Math.max(0,director.flashlightOff-dt);
+    if (director.radarGlitch > 0) director.radarGlitch=Math.max(0,director.radarGlitch-dt);
+    updatePhantoms(dt);
+    if (sceneState.horde) {
+        if (director.exposure.active) director.exposure.time += dt;
+        return;
+    }
+    const band=Math.min(9,Math.floor(director.timeDifficulty));
+    if (band !== director.timeBand) {
+        director.timeBand=band;
+        director.bandThunderDone=false;
+        director.bandThunderAt=random(.50,.75);
+    }
+    const within=director.timeDifficulty-band;
+    const noEarlyThunder=director.elapsed < 120 && director.gemDifficulty === 0;
+    if (!director.bandThunderDone && within >= director.bandThunderAt && !noEarlyThunder && !thunder.active) {
+        director.bandThunderDone=true;
+        startThunderEvent("time");
+    }
+    if (player.health < player.maxHealth * 0.45 && !thunder.active) {
+        const severity = 1 - player.health / Math.max(1, player.maxHealth * 0.45);
+        director.lowHealthThunderTimer -= dt * (1 + severity * 1.8);
+        if (director.lowHealthThunderTimer <= 0) {
+            startThunderEvent("lowhealth");
+            director.lowHealthThunderTimer = random(10, 22) * (1 - severity * 0.45);
+        }
+    } else if (player.health >= player.maxHealth * 0.45) {
+        director.lowHealthThunderTimer = Math.min(director.lowHealthThunderTimer, random(12, 22));
+    }
+    director.eventCooldown-=dt;
+    if (director.eventCooldown<=0) {
+        const t=getTimeDifficulty01();
+        const happened=Math.random() < 0.24 + t*0.68 ? triggerParanormalEvent() : false;
+        director.eventCooldown=random(18,38)*(1-t*.35) + (happened?0:5);
+    }
+    updateLowHealthHallucinations(dt);
+}
+
+function onGemCollected(color) {
+    if (director.collectedGems.has(color)) return;
+    director.collectedGems.add(color);
+    // 每颗宝石拾取都播放一次原有“神圣”提示音。
+    playSfx("portalReveal", 0.40, 1);
+    director.gemDifficulty=director.collectedGems.size;
+    monsterSpawner.max=30+director.gemDifficulty*20;
+    if (!sceneState.horde) startThunderEvent("gem");
+    if (director.gemDifficulty >= 3) enterExposureMode("gems");
+}
+
+function enterExposureMode(source="time") {
+    if (sceneState.horde) return;
+    sceneState.horde=true;
+    sceneState.timer=0;
+    director.exposure.active=true;
+    director.exposure.time=0;
+    director.exposure.source=source;
+    director.flashlightOff=0;
+    director.flashlightFlicker=0;
+    director.flashlightFlickerDuration=0;
+    director.flashlightOffPending=0;
+    director.radarGlitch=0;
+    director.phantoms.length=0;
+    thunder.active=false; thunder.flashAlpha=0; thunder.flashes=[];
+    startThunderEvent("exposure");
+    monsterSpawner.interval=.55;
+    monsterSpawner.max=monsterSpawner.hordeMax;
+    monsterSpawner.timer=.2;
+    monsterSpawner.hordeSpawnAnchor = null;
+    monsterSpawner.hordeSpawnAnchorTimer = 0;
+    refreshHordeSpawnAnchor();
+    for (const monster of monsters) makeMonsterFrenzy(monster,true);
+    playSfx("watcher",.18,.92);
+}
+
+function drawEerieShadow(x, y, width, height, alpha, angle = 0) {
+    const image = assets.shadowFigureWeb && assets.shadowFigureWeb.complete && assets.shadowFigureWeb.naturalWidth ? assets.shadowFigureWeb : assets.shadowFigure;
+    if (!image || !image.complete || !image.naturalWidth) return false;
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.rotate(angle);
+    ctx.globalAlpha=alpha;
+    ctx.filter="brightness(0.07) saturate(0) contrast(2.2)";
+    ctx.shadowColor="rgba(0,0,0,.9)";
+    ctx.shadowBlur=14;
+    ctx.drawImage(image,-width/2,-height/2,width,height);
+    ctx.restore();
+    return true;
+}
+
+function drawRoomDecorations() {
+    for (const room of maze.rooms) {
+        if (!room.door || !room.door.open) continue;
+        for (const d of room.decorations || []) {
+            if (d.type === "bones") drawSpriteCentered(assets.bones,d.x,d.y,54,54,d.angle || 0,.78);
+        }
+        const sh=room.ruinShadow;
+        if (sh && sh.active) drawEerieShadow(sh.x,sh.y,64,94,sh.moving?clamp(sh.life/1.85,0,1)*.92:.78);
+    }
+}
+
+function drawParanormalWorld() {
+    const theme=getCurrentThemeAssets();
+    for (const p of director.phantoms) {
+        const fadeWindow=p.kind === "cross" ? .55 : .35;
+        const a=clamp(p.life<fadeWindow?p.life/fadeWindow:1,0,1)*(p.alpha||.65);
+        if (p.kind === "item") {
+            const map={medkit:assets.medkit,key:assets.key,rifleAmmo:assets.rifleAmmo,shotgunAmmo:assets.shotgunAmmo};
+            drawSpriteCentered(map[p.itemType],p.x,p.y,34,34,0,a);
+        } else if (p.kind === "monster") drawActorSprite(p.x,p.y,0,"#aaa",theme.zombie,0,null,a,1);
+        else if (p.kind === "door") drawSpriteCentered(theme.door,p.x,p.y,maze.tileSize,maze.tileSize,0,a*.85);
+        else if (p.kind === "wall") drawSpriteCentered(theme.wall,p.x,p.y,maze.tileSize,maze.tileSize,0,a*.82);
+        else if (p.kind === "shadow") drawEerieShadow(p.x,p.y,60,86,a);
+        else if (p.kind === "cross") drawEerieShadow(p.x,p.y,68,100,a);
+    }
+}
+
+function getDisplayedRoomTypeForDoor(door) {
+    if (!door || door.roomId < 0) return null;
+    const room=maze.rooms[door.roomId];
+    if (!room) return null;
+    if (door.fakeMedicalIllusion && !door.open) return "medical";
+    return room.type;
+}
+
+function drawDoorIdentity(door,x,y,size) {
+    if (!door || door.open) return;
+    const type=getDisplayedRoomTypeForDoor(door);
+    const icons={medical:assets.roomMedical,armory:assets.roomArmory,repair:assets.roomRepair,supply:assets.roomSupply,ruin:assets.roomRuin};
+    const icon=icons[type];
+    if (!icon) return;
+    ctx.save();
+    const colors={medical:"#e56b6b",armory:"#d6b968",repair:"#8aa0ad",supply:"#b28b55",ruin:"#77746d"};
+    ctx.globalAlpha=.92;
+    ctx.strokeStyle=colors[type] || "rgba(255,255,255,.55)";
+    ctx.lineWidth=4;
+    ctx.strokeRect(x+8,y+8,size-16,size-16);
+    ctx.fillStyle="rgba(0,0,0,.38)";
+    ctx.beginPath(); ctx.arc(x+size/2,y+size/2,20,0,Math.PI*2); ctx.fill();
+    drawSpriteCentered(icon,x+size/2,y+size/2,32,32,0,.95);
+    ctx.restore();
+}
+
+function drawWatcherFace(alpha, eyeStrength) {
+    const image = assets.watcherFace;
+    if (!image || !image.complete || !image.naturalWidth) return;
+    const cx = window.innerWidth / 2;
+    const cy = window.innerHeight / 2;
+    const fullManifest = sceneState.horde || director.exposure.active;
+    const timeT = fullManifest ? 1 : getTimeDifficulty01();
+    const size = Math.min(window.innerWidth, window.innerHeight) * (.24 + timeT * .46);
+    ctx.save();
+    ctx.globalAlpha = clamp(alpha * 1.10, 0, 1);
+    ctx.filter = "grayscale(1) contrast(1.04) brightness(.92) blur(.25px)";
+    ctx.drawImage(image, cx-size/2, cy-size/2, size, size);
+    ctx.filter = "none";
+    if (eyeStrength > 0) {
+        const ex = size * .13;
+        const ey = -size * .10;
+        const r = size * .016;
+        ctx.shadowBlur = 28;
+        ctx.shadowColor = "#ff1515";
+        ctx.fillStyle = "rgba(255,20,20," + clamp(eyeStrength,0,1) + ")";
+        for (const side of [-1,1]) {
+            ctx.beginPath();
+            ctx.ellipse(cx + side*ex, cy + ey, r*1.18, r*.62, 0, 0, Math.PI*2);
+            ctx.fill();
+        }
+    }
+    ctx.restore();
+}
+
+function drawExposureOverlay() {
+    if (!director.exposure.active) return;
+    const t=director.exposure.time;
+    const d=director.exposure.duration;
+    const faceIn=clamp(t/.30,0,1);
+    const moveStart=.62;
+    const moveT=clamp((t-moveStart)/(d-moveStart),0,1);
+    const faceAlpha=faceIn*(1-moveT);
+    drawWatcherFace(faceAlpha,1);
+    if (t>=.50) {
+        const textT=clamp((t-.50)/(d-.50),0,1);
+        const ease=1-Math.pow(1-textT,3);
+        const y=(window.innerHeight*.50)*(1-ease)+18*ease;
+        const pulse=.82+Math.sin(timeNow*.012)*.18;
+        ctx.save(); ctx.textAlign="center"; ctx.textBaseline="top"; ctx.font="bold 30px sans-serif"; ctx.lineWidth=8;
+        ctx.strokeStyle="rgba(25,0,0,.96)"; ctx.strokeText("你已暴露，逃命吧",window.innerWidth/2,y);
+        ctx.fillStyle="rgba(255,42,42,"+pulse+")"; ctx.fillText("你已暴露，逃命吧",window.innerWidth/2,y); ctx.restore();
+    }
+    if (t>=d) director.exposure.active=false;
+}
 function updateSceneTimer(dt) {
     if (!sceneState.horde) {
         sceneState.timer = Math.max(0, sceneState.timer - dt);
-        if (sceneState.timer <= 0) {
-            sceneState.horde = true;
-            thunder.flashAlpha = 1;
-            thunder.active = false;
-            monsterSpawner.interval = 0.55;
-            monsterSpawner.max = monsterSpawner.hordeMax;
-            monsterSpawner.timer = 0.2;
-            for (const monster of monsters) makeMonsterFrenzy(monster, true);
-        }
+        if (sceneState.timer <= 0) enterExposureMode("time");
     }
+    updateDirector(dt);
     updateClones(dt);
 }
 
@@ -1638,6 +2960,7 @@ function teleportPlayerToCorridor() {
     let p = null;
     if (Math.random() < 0.78) p = getTeleportPointNearUncollectedKey();
     if (!p) p = randomFloorPosition(0);
+    playSfx("portal", 0.16, random(.92,1.04));
     player.x = p.x;
     player.y = p.y;
 
@@ -1718,6 +3041,7 @@ function updateClones(dt) {
 }
 
 function updatePlayer(dt) {
+    player.damageInvuln = Math.max(0, player.damageInvuln - dt);
     if (player.phaseDashCooldown > 0) {
         player.phaseDashCooldown = Math.max(0, player.phaseDashCooldown - dt);
         player.stamina = player.maxStamina * (1 - player.phaseDashCooldown);
@@ -1737,12 +3061,20 @@ function updatePlayer(dt) {
     }
     let moveX = 0;
     let moveY = 0;
-    if (keys.has("w") || keys.has("arrowup")) moveY -= 1;
-    if (keys.has("s") || keys.has("arrowdown")) moveY += 1;
-    if (keys.has("a") || keys.has("arrowleft")) moveX -= 1;
-    if (keys.has("d") || keys.has("arrowright")) moveX += 1;
-    player.moving = moveX !== 0 || moveY !== 0;
-    player.running = player.moving && keys.has("shift") && player.stamina > 0 && player.phaseDashCooldown <= 0;
+    player.actualMoving = false;
+    if (isMobileControls()) {
+        moveX = mobileInput.moveX;
+        moveY = mobileInput.moveY;
+    } else {
+        if (keys.has("w") || keys.has("arrowup")) moveY -= 1;
+        if (keys.has("s") || keys.has("arrowdown")) moveY += 1;
+        if (keys.has("a") || keys.has("arrowleft")) moveX -= 1;
+        if (keys.has("d") || keys.has("arrowright")) moveX += 1;
+    }
+    player.moving = Math.hypot(moveX, moveY) > 0.04;
+    if (player.staminaRunLocked && player.stamina >= player.maxStamina * 0.05) player.staminaRunLocked = false;
+    const wantsRun = isMobileControls() ? mobileInput.run : keys.has("shift");
+    player.running = player.moving && wantsRun && !player.staminaRunLocked && player.stamina > 0 && player.phaseDashCooldown <= 0;
     if (player.moving) {
         const length = Math.hypot(moveX, moveY);
         moveX /= length;
@@ -1753,7 +3085,8 @@ function updatePlayer(dt) {
         const hordeMove = sceneState.horde ? 1.30 : 1;
         const speed = baseSpeed * getMoveSpeedMultiplier() * getWeaponSpeedMultiplier() * fireSlow * monsterSlow * hordeMove;
         const moved = movePlayerWithWallAssist(moveX * speed * dt, moveY * speed * dt);
-        if (moved.x !== 0 || moved.y !== 0) {
+        if (Math.hypot(moved.x, moved.y) > 0.25) {
+            player.actualMoving = true;
             const moveAngle = Math.atan2(moved.y, moved.x);
             player.angle = lerpAngle(player.angle, moveAngle, 1 - Math.exp(-16 * dt));
         }
@@ -1762,9 +3095,10 @@ function updatePlayer(dt) {
     if (player.running) {
         player.stamina -= player.staminaUse * getStaminaUseMultiplier() * dt;
         player.stamina = Math.max(0, player.stamina);
+        if (player.stamina <= 0.001) player.staminaRunLocked = true;
     } else if (!weaponState.triggerDown && player.phaseDashCooldown <= 0) {
         const idleRecover = player.moving ? 1 : 1.45;
-        const hordeRecover = sceneState.horde ? 1.5 : 1;
+        const hordeRecover = sceneState.horde ? 1.75 : 1;
         player.stamina += player.staminaRecover * getStaminaRecoverMultiplier() * idleRecover * hordeRecover * dt;
         player.stamina = Math.min(player.maxStamina, player.stamina);
     }
@@ -1791,6 +3125,7 @@ function useStaminaSkill() {
     const skillAngle = aim.angle;
     player.angle = skillAngle;
     if (weaponState.current === "chainsaw") {
+        startChainsawRageAudio();
         weaponState.chainsawRage = true;
         weaponState.chainsawRageTime = 10;
         weaponState.chainsawRageAngle = skillAngle;
@@ -1799,6 +3134,7 @@ function useStaminaSkill() {
     }
     player.stamina = 0;
     const noPhase = weaponState.current === "katana";
+    playSfx(noPhase ? "katanaSkill" : "dashSkill", noPhase ? 0.52 : 0.44, noPhase ? 0.92 : 1.03);
     player.dash = {
         angle: skillAngle,
         remaining: maze.tileSize + 46,
@@ -1815,7 +3151,8 @@ function useStaminaSkill() {
         insideWall: false,
         crossedWall: false,
         preWallSafeX: player.x,
-        preWallSafeY: player.y
+        preWallSafeY: player.y,
+        fxTimer: 0
     };
 }
 
@@ -1876,7 +3213,16 @@ function updateDash(dt) {
         player.x += dx;
         player.y += dy;
     }
-    if (dash.katana) hitMonstersAlongKatanaDash(dash);
+    if (dash.katana) {
+        hitMonstersAlongKatanaDash(dash);
+        dash.fxTimer -= dt;
+        if (dash.fxTimer <= 0) {
+            dash.fxTimer = 0.055;
+            skillEffects.push({type:"katanaX", x:player.x, y:player.y, angle:dash.angle, time:0.24, duration:0.24});
+        }
+    } else if (dash.phaseWall) {
+        stunMonstersAlongPhaseDash(dash);
+    }
     dash.moved += step;
     dash.remaining -= step;
     if (dash.remaining <= 0) finishDash();
@@ -1920,11 +3266,19 @@ function finishDash() {
         player.stamina = 0;
         player.phaseDashCooldown = 1;
     }
-    if (dash.katana && dash.killed > 0 && weapons.katana.durability > 0) {
-        const cost = sceneState.horde ? 0.5 : 1;
-        weapons.katana.durability = Math.max(0, weapons.katana.durability - cost);
+    if (!sceneState.horde && dash.katana && dash.killed > 0 && weapons.katana.durability > 0) {
+        weapons.katana.durability = Math.max(0, weapons.katana.durability - 1);
     }
     player.dash = null;
+}
+
+function stunMonstersAlongPhaseDash(dash) {
+    for (const monster of monsters) {
+        if (dash.hit.has(monster)) continue;
+        if (Math.hypot(monster.x - player.x, monster.y - player.y) > 34 + monster.radius) continue;
+        dash.hit.add(monster);
+        monster.stunTime = Math.max(monster.stunTime || 0, 3);
+    }
 }
 
 function hitMonstersAlongKatanaDash(dash) {
@@ -1963,6 +3317,7 @@ function updateChainsawRage(dt) {
 function stopChainsawRage() {
     weaponState.chainsawRage = false;
     weaponState.chainsawRageTime = 0;
+    stopChainsawRageAudio();
 }
 
 // 交互
@@ -1981,7 +3336,7 @@ function getNearestInteractable() {
     }
     for (const item of maze.items) {
         if (item.collected) continue;
-        const manualItem = item.type === "whetstone" || item.type === "oil" || ["rifle", "shotgun", "katana", "chainsaw"].includes(item.type);
+        const manualItem = item.type === "whetstone" || item.type === "oil" || item.type === "warpPotion" || ["rifle", "shotgun", "katana", "chainsaw"].includes(item.type);
         if (!manualItem) continue;
         const distance = Math.hypot(item.x - player.x, item.y - player.y);
         if (distance <= 68 && distance < bestDistance) {
@@ -2031,16 +3386,20 @@ function interactItem(item) {
         return;
     }
     if (item.type === "warpPotion") {
-        teleportPlayerToCorridor();
+        breakStealth();
         item.collected = true;
+        playSfx("pickup", 0.10, random(0.96,1.05));
+        teleportPlayerToCorridor();
         showNotice("随机传送", "good");
         return;
     }
     if (item.type === "gem") {
         player.gems[item.gemColor] = true;
+        player.health = player.maxHealth;
         item.collected = true;
-        if (maze.portal) maze.portal.visibleOnRadar = true;
-        showNotice("获得" + ({red: "红", yellow: "黄", blue: "蓝"}[item.gemColor]) + "色宝石", "good");
+        onGemCollected(item.gemColor);
+        revealPortalOnRadar();
+        showGemPickupGuide(item.gemColor);
         return;
     }
     if (["rifle", "shotgun", "katana", "chainsaw"].includes(item.type)) {
@@ -2080,8 +3439,15 @@ function useRepairStation(item, weaponId) {
     else item.cooldown = 100;
 }
 
+function revealPortalOnRadar() {
+    if (!maze.portal || maze.portal.visibleOnRadar) return;
+    maze.portal.visibleOnRadar = true;
+}
+
 function canAutoPickupItem(item) {
     if (item.collected) return false;
+    // 随机传送改为手动 E 拾取，避免玩家只是路过就被强制传送。
+    if (item.type === "warpPotion") return false;
     if (item.type === "whetstone" || item.type === "oil") return false;
     if (["rifle", "shotgun", "katana", "chainsaw"].includes(item.type)) return false;
     if ((item.type === "medkit" || item.type === "smallMed") && player.health >= player.maxHealth) return false;
@@ -2104,8 +3470,9 @@ function autoPickupItem(item) {
         player.gems[item.gemColor] = true;
         player.health = player.maxHealth;
         item.collected = true;
-        if (maze.portal) maze.portal.visibleOnRadar = true;
-        showNotice("获得" + ({red: "红", yellow: "黄", blue: "蓝"}[item.gemColor]) + "色宝石，生命已恢复", "good");
+        onGemCollected(item.gemColor);
+        revealPortalOnRadar();
+        showGemPickupGuide(item.gemColor);
         return true;
     }
     if (item.type === "medkit") {
@@ -2165,6 +3532,7 @@ function autoPickupItem(item) {
         return true;
     }
     if (item.type === "coin") {
+        playSfx("coin", 0.09, random(0.98,1.05));
         sceneState.sceneCoins += Math.max(1, item.amount || 1);
         item.collected = true;
         showNotice("金币 +" + Math.max(1, item.amount || 1), "good");
@@ -2186,7 +3554,7 @@ function updateItems(dt) {
         }
         if (!canAutoPickupItem(item)) continue;
         const distance = Math.hypot(item.x - player.x, item.y - player.y);
-        if (distance <= 54) autoPickupItem(item);
+        if (distance <= 54 && autoPickupItem(item) && item.type !== "coin") playSfx("pickup", 0.10, random(0.96,1.05));
     }
     const tile = worldToTile(player.x, player.y);
     if (isInsideMap(tile.col, tile.row)) {
@@ -2232,6 +3600,8 @@ function bankSceneCoins() {
 }
 
 function nextScene() {
+    stopAudioNow(audioState.portalHum);
+    playSfx("portal", 0.18, 1);
     bankSceneCoins();
     maze.scene++;
     player.keys = 0;
@@ -2253,8 +3623,10 @@ function nextScene() {
 function openDoor(door) {
     if (door.open || player.keys <= 0) return;
     breakStealth();
+    playSfx("doorOpen", 0.18, random(0.94,1.03));
     player.keys--;
     door.open = true;
+    door.fakeMedicalIllusion = false;
     maze.grid[door.y][door.x] = 0;
     if (door.roomId >= 0) player.exploredRooms.add(door.roomId);
     if (door.content === "trap") {
@@ -2310,18 +3682,22 @@ function startTrapQte(door) {
     if (trapQte.active || door.triggered) return;
     door.triggered = true;
     trapQte.active = true;
-    trapQte.phase = "warning";
-    trapQte.warningTime = random(0.72, 0.98);
+    trapQte.phase = "active";
+    // 预警声与圆盘同时出现，让第一次接触 QTE 的玩家也有完整观察与反应时间。
+    trapQte.warningTime = 0;
     trapQte.activeTime = 0;
-    trapQte.successSize = random(0.95, 1.25);
-    trapQte.greatSize = trapQte.successSize * random(0.20, 0.28);
+    // Good 大约占圆周 10~13%，Great 约 3% 左右，视觉和判定都更接近 DBD 式 Skill Check。
+    trapQte.successSize = random(Math.PI * 2 * 0.10, Math.PI * 2 * 0.13);
+    trapQte.greatSize = random(Math.PI * 2 * 0.028, Math.PI * 2 * 0.036);
     trapQte.successStart = random(0.35, Math.PI * 2 - trapQte.successSize - 0.15);
     trapQte.greatStart = trapQte.successStart + (trapQte.successSize - trapQte.greatSize) * random(0.42, 0.58);
-    trapQte.startAngle = normalizePositiveAngle(trapQte.successStart - random(1.35, 2.10));
+    trapQte.startAngle = normalizePositiveAngle(trapQte.successStart - random(2.15, 3.15));
     trapQte.needleAngle = trapQte.startAngle;
     trapQte.travel = 0;
-    trapQte.speed = random(3.1, 3.8);
+    // 一圈约 1.08~1.18 秒，不再像旧版那样慢悠悠转两秒。
+    trapQte.speed = random(3.45, 3.85);
     trapQte.door = door;
+    playQteSound("warning");
 }
 
 function applyTrapFailure(door) {
@@ -2369,11 +3745,14 @@ function resolveTrapQte() {
     if (!trapQte.active || trapQte.phase !== "active") return;
     const needle = normalizePositiveAngle(trapQte.needleAngle);
     if (angleInsideArc(needle, trapQte.greatStart, trapQte.greatSize)) {
+        playQteSound("great");
         showNotice("高精准判定！", "good");
         grantGreatQteReward();
     } else if (angleInsideArc(needle, trapQte.successStart, trapQte.successSize)) {
+        playQteSound("good");
         showNotice("QTE成功", "good");
     } else {
+        playQteSound("fail");
         applyTrapFailure(trapQte.door);
     }
     trapQte.active = false;
@@ -2396,6 +3775,7 @@ function updateTrapQte(dt) {
     trapQte.needleAngle = normalizePositiveAngle(trapQte.needleAngle + step);
     trapQte.travel += step;
     if (trapQte.travel >= Math.PI * 2) {
+        playQteSound("fail");
         applyTrapFailure(trapQte.door);
         trapQte.active = false;
         trapQte.phase = "idle";
@@ -2405,37 +3785,90 @@ function updateTrapQte(dt) {
 
 // 寻路
 // 寻路
-function findPath(startX, startY, endX, endY) {
+const pathScratch = {
+    cols: 0,
+    rows: 0,
+    seen: null,
+    parent: null,
+    queue: null,
+    stamp: 1
+};
+function ensurePathScratch() {
+    const size = maze.cols * maze.rows;
+    if (pathScratch.cols === maze.cols && pathScratch.rows === maze.rows && pathScratch.seen && pathScratch.seen.length === size) return;
+    pathScratch.cols = maze.cols;
+    pathScratch.rows = maze.rows;
+    pathScratch.seen = new Int32Array(size);
+    pathScratch.parent = new Int32Array(size);
+    pathScratch.queue = new Int32Array(size);
+    pathScratch.stamp = 1;
+}
+function isMonsterPathWalkableTile(col, row, allowPassageDoors = false) {
+    if (isWalkableTile(col, row)) return true;
+    if (!allowPassageDoors || !isInsideMap(col, row)) return false;
+    const door = maze.doors.get(col + "," + row);
+    return !!(door && !door.open && door.roomDoor === false);
+}
+
+function findPath(startX, startY, endX, endY, allowPassageDoors = false) {
     const start = worldToTile(startX, startY);
     const end = worldToTile(endX, endY);
-    if (!isWalkableTile(start.col, start.row) || !isWalkableTile(end.col, end.row)) return [];
-    const visited = Array.from({length: maze.rows}, () => Array(maze.cols).fill(false));
-    const parent = Array.from({length: maze.rows}, () => Array(maze.cols).fill(null));
-    const queue = [[start.col, start.row]];
-    visited[start.row][start.col] = true;
+    if (!isMonsterPathWalkableTile(start.col, start.row, allowPassageDoors) || !isMonsterPathWalkableTile(end.col, end.row, allowPassageDoors)) return [];
+    ensurePathScratch();
+    if (pathScratch.stamp >= 2147483000) {
+        pathScratch.seen.fill(0);
+        pathScratch.stamp = 1;
+    } else {
+        pathScratch.stamp++;
+    }
+    const stamp = pathScratch.stamp;
+    const cols = maze.cols;
+    const seen = pathScratch.seen;
+    const parent = pathScratch.parent;
+    const queue = pathScratch.queue;
+    const startIndex = start.row * cols + start.col;
+    const endIndex = end.row * cols + end.col;
     let head = 0;
-    const directions = [[1, 0], [-1, 0], [0, 1], [0, -1]];
-    while (head < queue.length) {
-        const current = queue[head++];
-        const x = current[0];
-        const y = current[1];
-        if (x === end.col && y === end.row) break;
-        for (const direction of directions) {
-            const nx = x + direction[0];
-            const ny = y + direction[1];
-            if (!isWalkableTile(nx, ny) || visited[ny][nx]) continue;
-            visited[ny][nx] = true;
-            parent[ny][nx] = [x, y];
-            queue.push([nx, ny]);
+    let tail = 0;
+    queue[tail++] = startIndex;
+    seen[startIndex] = stamp;
+    parent[startIndex] = -1;
+    while (head < tail) {
+        const currentIndex = queue[head++];
+        if (currentIndex === endIndex) break;
+        const x = currentIndex % cols;
+        const y = (currentIndex / cols) | 0;
+        let nx, ny, nextIndex;
+        nx = x + 1; ny = y;
+        if (isMonsterPathWalkableTile(nx, ny, allowPassageDoors)) {
+            nextIndex = ny * cols + nx;
+            if (seen[nextIndex] !== stamp) { seen[nextIndex] = stamp; parent[nextIndex] = currentIndex; queue[tail++] = nextIndex; }
+        }
+        nx = x - 1; ny = y;
+        if (isMonsterPathWalkableTile(nx, ny, allowPassageDoors)) {
+            nextIndex = ny * cols + nx;
+            if (seen[nextIndex] !== stamp) { seen[nextIndex] = stamp; parent[nextIndex] = currentIndex; queue[tail++] = nextIndex; }
+        }
+        nx = x; ny = y + 1;
+        if (isMonsterPathWalkableTile(nx, ny, allowPassageDoors)) {
+            nextIndex = ny * cols + nx;
+            if (seen[nextIndex] !== stamp) { seen[nextIndex] = stamp; parent[nextIndex] = currentIndex; queue[tail++] = nextIndex; }
+        }
+        nx = x; ny = y - 1;
+        if (isMonsterPathWalkableTile(nx, ny, allowPassageDoors)) {
+            nextIndex = ny * cols + nx;
+            if (seen[nextIndex] !== stamp) { seen[nextIndex] = stamp; parent[nextIndex] = currentIndex; queue[tail++] = nextIndex; }
         }
     }
-    if (!visited[end.row][end.col]) return [];
+    if (seen[endIndex] !== stamp) return [];
     const path = [];
-    let current = [end.col, end.row];
-    while (!(current[0] === start.col && current[1] === start.row)) {
-        path.push(tileCenter(current[0], current[1]));
-        current = parent[current[1]][current[0]];
-        if (!current) return [];
+    let currentIndex = endIndex;
+    while (currentIndex !== startIndex) {
+        const col = currentIndex % cols;
+        const row = (currentIndex / cols) | 0;
+        path.push(tileCenter(col, row));
+        currentIndex = parent[currentIndex];
+        if (currentIndex < 0) return [];
     }
     path.reverse();
     return path;
@@ -2460,11 +3893,14 @@ function choosePatrolPath(monster) {
 
 // 怪物
 function getMonsterVisualRange(monster) {
-    return maze.tileSize * 3.65;
+    if (sceneState.horde || monster.frenzyLocked) return maze.tileSize * 18;
+    return maze.tileSize * 3.65 * getMonsterGemMultipliers().visual;
 }
 
 function getMonsterChaseRange(monster) {
-    return maze.tileSize * (monster.frenzy ? 17 : 12);
+    if (sceneState.horde || monster.frenzyLocked) return maze.tileSize * 18;
+    const base = monster.frenzy ? 17 : 12;
+    return maze.tileSize * base * getMonsterGemMultipliers().chase;
 }
 
 function isPointInsidePlayerFlashlight(x, y) {
@@ -2523,6 +3959,85 @@ function findAmbientCorridorSpawn() {
         const row = 1 + Math.floor(Math.random() * (maze.rows - 2));
         const point = tileCenter(col, row);
         if (isValidAmbientMonsterSpawn(point.x, point.y)) return point;
+    }
+    return null;
+}
+
+function getHordeEdgeAnchors() {
+    const midCol = Math.floor(maze.cols / 2);
+    const midRow = Math.floor(maze.rows / 2);
+    return [
+        {col: 1, row: 1}, {col: midCol, row: 1}, {col: maze.cols - 2, row: 1},
+        {col: maze.cols - 2, row: midRow}, {col: maze.cols - 2, row: maze.rows - 2},
+        {col: midCol, row: maze.rows - 2}, {col: 1, row: maze.rows - 2}, {col: 1, row: midRow}
+    ];
+}
+
+function refreshHordeSpawnAnchor() {
+    const anchors = getHordeEdgeAnchors();
+    if (anchors.length === 0) return null;
+    const scored = anchors.map((anchor) => {
+        const p = tileCenter(anchor.col, anchor.row);
+        return {anchor, distance: Math.hypot(p.x - player.x, p.y - player.y)};
+    }).sort((a,b) => b.distance - a.distance);
+    // 从离玩家最远的一批边缘点里挑一个，并维持数秒，形成清晰怪潮方向。
+    const pool = scored.slice(0, Math.min(4, scored.length));
+    monsterSpawner.hordeSpawnAnchor = pool[Math.floor(Math.random() * pool.length)].anchor;
+    monsterSpawner.hordeSpawnAnchorTimer = 7.5;
+    return monsterSpawner.hordeSpawnAnchor;
+}
+
+function isValidHordeEdgeSpawn(x, y) {
+    if (!isValidAmbientMonsterSpawn(x, y)) return false;
+    if (Math.hypot(x - player.x, y - player.y) < maze.tileSize * 7.5) return false;
+    for (const monster of monsters) {
+        if (Math.hypot(x - monster.x, y - monster.y) < maze.tileSize * 0.8) return false;
+    }
+    return true;
+}
+
+function findHordeEdgeSpawn() {
+    const anchor = monsterSpawner.hordeSpawnAnchor || refreshHordeSpawnAnchor();
+    if (!anchor) return findAmbientCorridorSpawn();
+    const edgeBand = 5;
+    const candidates = [];
+    for (let row = 1; row < maze.rows - 1; row++) {
+        for (let col = 1; col < maze.cols - 1; col++) {
+            const nearEdge = col <= edgeBand || row <= edgeBand || col >= maze.cols - 1 - edgeBand || row >= maze.rows - 1 - edgeBand;
+            if (!nearEdge || maze.roomGrid[row][col] !== -1) continue;
+            const point = tileCenter(col, row);
+            if (!isValidHordeEdgeSpawn(point.x, point.y)) continue;
+            const anchorDistance = Math.hypot(col - anchor.col, row - anchor.row);
+            candidates.push({point, score: anchorDistance + Math.random() * 0.65});
+        }
+    }
+    if (candidates.length === 0) return findAmbientCorridorSpawn();
+    candidates.sort((a,b) => a.score - b.score);
+    const choicePool = candidates.slice(0, Math.min(10, candidates.length));
+    return choicePool[Math.floor(Math.random() * choicePool.length)].point;
+}
+
+function getHordeFunnelPoint() {
+    const anchor = monsterSpawner.hordeSpawnAnchor;
+    if (!anchor) return null;
+    const anchorPoint = tileCenter(anchor.col, anchor.row);
+    const dx = anchorPoint.x - player.x;
+    const dy = anchorPoint.y - player.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1) return null;
+    const desiredX = player.x + dx / len * maze.tileSize * 3.2;
+    const desiredY = player.y + dy / len * maze.tileSize * 3.2;
+    const base = worldToTile(desiredX, desiredY);
+    for (let radius = 0; radius <= 5; radius++) {
+        for (let oy = -radius; oy <= radius; oy++) {
+            for (let ox = -radius; ox <= radius; ox++) {
+                if (Math.max(Math.abs(ox), Math.abs(oy)) !== radius) continue;
+                const col = base.col + ox, row = base.row + oy;
+                if (!isInsideMap(col, row) || maze.roomGrid[row][col] !== -1) continue;
+                if (!isMonsterPathWalkableTile(col, row, true)) continue;
+                return tileCenter(col, row);
+            }
+        }
     }
     return null;
 }
@@ -2623,9 +4138,20 @@ function spawnMonsterGroupCorridor(count, frenzy = false) {
     return spawned;
 }
 
+function spawnMonsterGroupHordeEdge(count) {
+    let spawned = 0;
+    for (let i = 0; i < count * 20 && spawned < count && monsters.length < monsterSpawner.max; i++) {
+        const point = findHordeEdgeSpawn();
+        if (!point) continue;
+        if (spawnMonster(point.x, point.y, {frenzy: true, frenzyLocked: true})) spawned++;
+    }
+    return spawned;
+}
+
 function spawnAmbientGroup(frenzy = false) {
     if (monsters.length >= monsterSpawner.max) return 0;
     const remaining = monsterSpawner.max - monsters.length;
+    if (sceneState.horde) return spawnMonsterGroupHordeEdge(Math.min(remaining, 4));
     const roomGroup = Math.random() < 0.68;
     const targetCount = Math.min(remaining, roomGroup ? 5 : 3);
     return roomGroup ? spawnMonsterGroupNearRoom(targetCount, frenzy) : spawnMonsterGroupCorridor(targetCount, frenzy);
@@ -2640,7 +4166,11 @@ function spawnInitialMonsterGroups() {
 }
 
 function updateMonsterSpawner(dt) {
-    monsterSpawner.max = sceneState.horde ? monsterSpawner.hordeMax : 30;
+    monsterSpawner.max = sceneState.horde ? monsterSpawner.hordeMax : 30 + director.gemDifficulty * 20;
+    if (sceneState.horde) {
+        monsterSpawner.hordeSpawnAnchorTimer = Math.max(0, monsterSpawner.hordeSpawnAnchorTimer - dt);
+        if (!monsterSpawner.hordeSpawnAnchor || monsterSpawner.hordeSpawnAnchorTimer <= 0) refreshHordeSpawnAnchor();
+    }
     if (monsters.length >= monsterSpawner.max) return;
     monsterSpawner.timer -= dt;
     if (monsterSpawner.timer > 0) return;
@@ -2652,9 +4182,25 @@ function updateMonsterSpawner(dt) {
     }
 }
 
+function tryOpenPassageDoorForMonster(monster, worldX, worldY) {
+    if (!sceneState.horde || !monster || !monster.frenzy) return false;
+    const tile = worldToTile(worldX, worldY);
+    const door = maze.doors.get(tile.col + "," + tile.row);
+    // 只允许怪物打开走廊门；房间门仍然保持玩家探索/钥匙规则。
+    if (!door || door.open || door.roomDoor !== false) return false;
+    door.open = true;
+    door.fakeMedicalIllusion = false;
+    maze.grid[door.y][door.x] = 0;
+    if (Math.hypot(monster.x - player.x, monster.y - player.y) < maze.tileSize * 8) {
+        playSfx("doorOpen", 0.10, random(0.90,1.00));
+    }
+    return true;
+}
+
 function moveMonsterOnPath(monster, dt) {
     if (monster.pathIndex >= monster.path.length) return true;
     const target = monster.path[monster.pathIndex];
+    if (sceneState.horde && monster.frenzy) tryOpenPassageDoorForMonster(monster, target.x, target.y);
     const dx = target.x - monster.x;
     const dy = target.y - monster.y;
     const distance = Math.hypot(dx, dy);
@@ -2666,16 +4212,18 @@ function moveMonsterOnPath(monster, dt) {
     monster.angle = lerpAngle(monster.angle, angle, 1 - Math.exp(-10 * dt));
     const slowMultiplier = monster.slowTime > 0 ? 0.52 : 1;
     const stateBoost = monster.frenzy ? 1.48 : (monster.state === "chase" ? 1.12 : 1);
-    const step = Math.min(distance, monster.speed * slowMultiplier * stateBoost * dt);
+    const gemSpeed = sceneState.horde ? 1 : getMonsterGemMultipliers().speed;
+    const step = Math.min(distance, monster.speed * slowMultiplier * stateBoost * gemSpeed * dt);
     moveCircle(monster, Math.cos(angle) * step, Math.sin(angle) * step, monster.radius);
     return false;
 }
 
 function choosePatrolPath(monster) {
     const tile = worldToTile(monster.x, monster.y);
+    const patrolRadius = sceneState.horde ? 9 : 5 + director.gemDifficulty * 2;
     for (let i = 0; i < 30; i++) {
-        const col = clamp(tile.col + Math.floor(random(-5, 6)), 1, maze.cols - 2);
-        const row = clamp(tile.row + Math.floor(random(-5, 6)), 1, maze.rows - 2);
+        const col = clamp(tile.col + Math.floor(random(-patrolRadius, patrolRadius + 1)), 1, maze.cols - 2);
+        const row = clamp(tile.row + Math.floor(random(-patrolRadius, patrolRadius + 1)), 1, maze.rows - 2);
         if (!isWalkableTile(col, row)) continue;
         const target = tileCenter(col, row);
         const path = findPath(monster.x, monster.y, target.x, target.y);
@@ -2734,6 +4282,7 @@ function pickAlertPoint(soundX, soundY) {
 
 function enterAlertState(monster, soundX, soundY) {
     if (!monster || monster.frenzyLocked || monster.state === "attack" || monster.state === "chase" || monster.state === "frenzy") return;
+    if (Math.hypot(monster.x-player.x, monster.y-player.y) < maze.tileSize*5) playSfx("monsterAlert", 0.055, random(0.92,1.06));
     const point = pickAlertPoint(soundX, soundY);
     monster.state = "alert";
     monster.alertX = point.x;
@@ -2776,7 +4325,7 @@ function enterAttackState(monster, target) {
     monster.state = "attack";
     monster.chaseTarget = target;
     monster.attackPhase = "windup";
-    monster.attackPhaseTimer = monster.frenzy ? 0.34 : 0.55;
+    monster.attackPhaseTimer = monster.frenzy ? 0.34 : 0.55 / getMonsterGemMultipliers().attackSpeed;
     monster.path = [];
     monster.pathIndex = 0;
 }
@@ -2795,17 +4344,28 @@ function updateMonsterAttack(monster, dt) {
         if (monster.attackPhaseTimer > 0) return;
         if (distance <= attackRange + 12 && hasLineOfSight(monster.x, monster.y, target.x, target.y)) {
             monster.attackAnim = 0.30;
-            if (target === player) damagePlayer(monster.attackDamage, "monster");
-            else damageClone(target, monster.attackDamage);
+            if (target === player) {
+                if (monsterManager.attackCooldown <= 0 && player.damageInvuln <= 0) {
+                    monsterManager.attackCooldown = monsterManager.attackGap;
+                    playSfx("monsterAttack", 0.11, monster.frenzy ? 1.08 : 0.98);
+                    damagePlayer(monster.attackDamage, "monster");
+                }
+            } else {
+                if (monsterManager.attackCooldown <= 0) {
+                    monsterManager.attackCooldown = monsterManager.attackGap * 0.75;
+                    playSfx("monsterAttack", 0.08, monster.frenzy ? 1.08 : 0.98);
+                    damageClone(target, monster.attackDamage);
+                }
+            }
         }
         monster.attackPhase = "recovery";
-        monster.attackPhaseTimer = monster.frenzy ? 0.48 : 0.75;
+        monster.attackPhaseTimer = monster.frenzy ? 0.48 : 0.75 / getMonsterGemMultipliers().attackSpeed;
         return;
     }
     if (monster.attackPhase === "recovery" && monster.attackPhaseTimer <= 0) {
         if (distance <= attackRange && hasLineOfSight(monster.x, monster.y, target.x, target.y)) {
             monster.attackPhase = "windup";
-            monster.attackPhaseTimer = monster.frenzy ? 0.34 : 0.55;
+            monster.attackPhaseTimer = monster.frenzy ? 0.34 : 0.55 / getMonsterGemMultipliers().attackSpeed;
         } else {
             monster.state = monster.frenzy ? "frenzy" : "chase";
             monster.attackPhase = null;
@@ -2815,8 +4375,10 @@ function updateMonsterAttack(monster, dt) {
 }
 
 function updateMonsters(dt) {
-    for (const monster of [...monsters]) {
-        if (!monsters.includes(monster)) continue;
+    monsterManager.attackCooldown = Math.max(0, monsterManager.attackCooldown - dt);
+    monsterManager.pathBudget = monsterManager.maxPathBudget;
+    for (let mi = 0; mi < monsters.length; mi++) {
+        const monster = monsters[mi];
         monster.repathTimer -= dt;
         monster.stunTime = Math.max(0, (monster.stunTime || 0) - dt);
         monster.slowTime = Math.max(0, (monster.slowTime || 0) - dt);
@@ -2851,8 +4413,9 @@ function updateMonsters(dt) {
         if (monster.state === "patrol") {
             if (visibleTarget) { monster.state = "chase"; monster.chaseTarget = visibleTarget; continue; }
             if (monster.wait > 0) { monster.wait -= dt; continue; }
-            if (monster.path.length === 0 || monster.pathIndex >= monster.path.length) choosePatrolPath(monster);
-            else if (moveMonsterOnPath(monster, dt)) { monster.path = []; monster.pathIndex = 0; monster.wait = random(0.35, 1.1); }
+            if (monster.path.length === 0 || monster.pathIndex >= monster.path.length) {
+                if (monsterManager.pathBudget > 0) { monsterManager.pathBudget--; choosePatrolPath(monster); }
+            } else if (moveMonsterOnPath(monster, dt)) { monster.path = []; monster.pathIndex = 0; monster.wait = random(0.35, 1.1); }
             continue;
         }
 
@@ -2900,17 +4463,24 @@ function updateMonsters(dt) {
                 enterAttackState(monster, target);
                 continue;
             }
-            if (monster.repathTimer <= 0) {
-                monster.repathTimer = monster.frenzy ? 0.22 : 0.38;
+            if (monster.repathTimer <= 0 && monsterManager.pathBudget > 0) {
+                monsterManager.pathBudget--;
+                monster.repathTimer = sceneState.horde ? 0.55 : (monster.frenzy ? 0.26 : 0.44);
                 if (!directSight && !sceneState.horde && monster.wrongBranchCooldown <= 0 && getWalkableDegreeAtWorld(monster.x, monster.y) >= 3 && Math.random() < 0.22) {
                     if (!chooseWrongBranch(monster)) {
                         monster.path = findPath(monster.x, monster.y, monster.lastSeenX, monster.lastSeenY);
                         monster.pathIndex = 0;
                     }
                 } else {
-                    const tx = sceneState.horde ? target.x : (directSight ? target.x : monster.lastSeenX);
-                    const ty = sceneState.horde ? target.y : (directSight ? target.y : monster.lastSeenY);
-                    monster.path = findPath(monster.x, monster.y, tx, ty);
+                    let tx = sceneState.horde ? target.x : (directSight ? target.x : monster.lastSeenX);
+                    let ty = sceneState.horde ? target.y : (directSight ? target.y : monster.lastSeenY);
+                    // 暴露逃亡时，远处怪物先朝同一个“追击汇流点”移动，形成一股怪潮。
+                    // 进入玩家附近后再直接追人，既保持压力，也给穿墙技能真正的脱身价值。
+                    if (sceneState.horde && chaseDistance > maze.tileSize * 4.5) {
+                        const funnel = getHordeFunnelPoint();
+                        if (funnel) { tx = funnel.x; ty = funnel.y; }
+                    }
+                    monster.path = findPath(monster.x, monster.y, tx, ty, sceneState.horde && monster.frenzy);
                     monster.pathIndex = 0;
                 }
             }
@@ -2980,6 +4550,7 @@ function equipSecondaryFromItem(item) {
         weapons[item.type].durability = item.weaponDurability == null ? weapons[item.type].maxDurability : item.weaponDurability;
     }
     item.collected = true;
+    playSfx("pickup", 0.09, random(.94,1.04));
     breakStealth();
     triggerWeaponUiSwap(oldCurrent);
     showNotice(old ? "交换为 " + weapons[item.type].name : "拾取 " + weapons[item.type].name, "good");
@@ -2995,6 +4566,8 @@ function startReload() {
     }
     weaponState.reloading = true;
     weaponState.reloadTimer = weapon.reload;
+    weaponState.reloadSoundStage = 0;
+    if (weaponState.current !== "shotgun") playSfx("reloadClick", 0.12, random(.98,1.03));
     showNotice(weaponState.current === "shotgun" ? "装填中" : "换弹中");
 }
 
@@ -3002,18 +4575,21 @@ function finishReload() {
     const weapon = weapons[weaponState.current];
     if (!weapon || weapon.type !== "gun") {
         weaponState.reloading = false;
+        weaponState.reloadSoundStage = 0;
         return;
     }
     if (weaponState.current === "shotgun") {
         if (weapon.mag < weapon.magSize && (sceneState.horde || weapon.reserve > 0)) {
             weapon.mag++;
             if (!sceneState.horde) weapon.reserve--;
+            playSfx("reloadShell", 0.090, random(.94,1.05));
         }
         if (weapon.mag < weapon.magSize && (sceneState.horde || weapon.reserve > 0)) {
             weaponState.reloadTimer = weapon.reload;
             weaponState.reloading = true;
         } else {
             weaponState.reloading = false;
+            playSfx("shotgunCock", 0.095, random(.95,1.03));
         }
         return;
     }
@@ -3025,12 +4601,20 @@ function finishReload() {
         weapon.reserve -= amount;
     }
     weaponState.reloading = false;
+    weaponState.reloadSoundStage = 0;
+    playSfx("reloadClick", 0.13, random(.96,1.02));
 }
 
 function tryAttack(initial = false) {
-    if ((weaponState.reloading && weaponState.current !== "shotgun") || weaponState.chainsawRage || player.dash) return;
+    if (weaponState.chainsawRage || player.dash) return;
     const weapon = weapons[weaponState.current];
     if (!weapon) return;
+    if (initial && weapon.type === "gun" && weapon.mag <= 0) {
+        playSfx("dryFire", 0.34, random(.96,1.04));
+        if (!weaponState.reloading) startReload();
+        return;
+    }
+    if (weaponState.reloading && weaponState.current !== "shotgun") return;
     if (weapon.type === "gun") {
         if (weaponState.current === "rifle") {
             if (initial) fireGun();
@@ -3052,6 +4636,8 @@ function fireGun() {
     }
     weapon.mag--;
     weaponState.fireTimer = weapon.interval;
+    playSfx(weaponState.current === "shotgun" ? "shotgun" : weaponState.current === "rifle" ? "rifle" : "pistol", weaponState.current === "shotgun" ? 0.72 : weaponState.current === "rifle" ? 0.58 : 0.50, random(0.97,1.03));
+    if (weaponState.current === "shotgun") playSfx("shotgunBoom", 0.22, random(.82,.90));
     emitNoise(weapon.noise);
     if (weaponState.current === "shotgun") fireShotgun();
     else if (weaponState.current === "rifle") fireRifle();
@@ -3079,7 +4665,7 @@ function fireRifle() {
 }
 
 function fireShotgun() {
-    player.fireSlowTime = 0.16;
+    player.fireSlowTime = 0.24;
     feedback.shake = Math.max(feedback.shake, 0.32);
     const count = 8;
     const spread = 0.32;
@@ -3093,6 +4679,7 @@ function fireShotgun() {
 function getMeleeDamage(weaponId) {
     const weapon = weapons[weaponId];
     if (!weapon || weapon.type !== "melee") return 0;
+    if (sceneState.horde) return 50;
     const ratio = clamp(weapon.durability / Math.max(1, weapon.maxDurability), 0, 1);
     // 以普通怪 50 点生命为基准：满耐久1击，约70%时2击，50%时3击，30%时4击，30%以下5击。
     if (ratio >= 0.90) return 50;
@@ -3120,6 +4707,8 @@ function meleeAttack() {
     if (!weapon || weapon.type !== "melee") return;
     weaponState.meleeTimer = weapon.interval;
     startMeleeAnimation(weaponState.current);
+    if (weaponState.current === "chainsaw") playChainsawSweepAudio();
+    else playSfx("katana", 0.18, random(0.96,1.04));
     emitNoise(weapon.noise);
     if (weaponState.current === "katana") katanaHit();
     if (weaponState.current === "chainsaw") chainsawHit(false, true);
@@ -3146,9 +4735,8 @@ function katanaHit() {
             killed++;
         }
     }
-    if (killed > 0 && weapons.katana.durability > 0) {
-        const cost = killed * (sceneState.horde ? 0.5 : 1);
-        weapons.katana.durability = Math.max(0, weapons.katana.durability - cost);
+    if (!sceneState.horde && killed > 0 && weapons.katana.durability > 0) {
+        weapons.katana.durability = Math.max(0, weapons.katana.durability - killed);
     }
 }
 
@@ -3198,9 +4786,8 @@ function chainsawHit(rage, activeSweep = false) {
             kills++;
         }
     }
-    if (activeSweep && kills > 0 && weapons.chainsaw.durability > 0) {
-        const cost = kills * (sceneState.horde ? 0.5 : 1);
-        weapons.chainsaw.durability = Math.max(0, weapons.chainsaw.durability - cost);
+    if (!sceneState.horde && activeSweep && kills > 0 && weapons.chainsaw.durability > 0) {
+        weapons.chainsaw.durability = Math.max(0, weapons.chainsaw.durability - kills);
     }
 }
 
@@ -3223,7 +4810,8 @@ function maybeSpawnMonsterDrop(monster) {
     else if (roll < 0.19) type = "warpPotion";
     else if (roll < 0.225) type = "clonePotion";
     if (!type) return;
-    maze.items.push({type, x: monster.x, y: monster.y, collected: false, roomId: -1, life: 10});
+    // 怪物掉落物默认短时存在；随机传送属于战术道具，保留 60 秒等待玩家手动拾取。
+    maze.items.push({type, x: monster.x, y: monster.y, collected: false, roomId: -1, life: type === "warpPotion" ? 60 : 10});
 }
 
 function killMonster(monster) {
@@ -3246,11 +4834,19 @@ function updateWeapon(dt) {
     weaponState.rifleReset = Math.max(0, weaponState.rifleReset - dt);
     if (weaponState.rifleReset <= 0) weaponState.rifleBurst = 0;
     if (weaponState.reloading) {
-        weaponState.reloadTimer -= dt * (sceneState.horde ? 1.5 : 1);
+        const reloadWeapon = weapons[weaponState.current];
+        const speed = sceneState.horde ? 1.5 : 1;
+        weaponState.reloadTimer -= dt * speed;
+        if (reloadWeapon && weaponState.current !== "shotgun" && weaponState.reloadSoundStage === 0 && weaponState.reloadTimer <= reloadWeapon.reload * 0.58) {
+            weaponState.reloadSoundStage = 1;
+            if (weaponState.current === "pistol") playSfx("reloadMag", 0.19, random(.98,1.02));
+            else if (weaponState.current === "rifle") playSfx("reloadRifle", 0.205, random(.98,1.02));
+        }
         if (weaponState.reloadTimer <= 0) finishReload();
     }
     if (weaponState.triggerDown && !weaponState.reloading && !weaponState.chainsawRage && !player.dash) {
         if (weaponState.current === "rifle") fireGun();
+        else if (weapons[weaponState.current] && weapons[weaponState.current].type === "melee" && weaponState.meleeTimer <= 0) meleeAttack();
     }
     if (weaponState.current === "chainsaw") {
         if (!weaponState.chainsawRage && weaponState.chainsawContactTimer <= 0) {
@@ -3306,7 +4902,7 @@ function updateBullets(dt) {
         if (hit) continue;
         const screenX = bullet.x - camera.x;
         const screenY = bullet.y - camera.y;
-        if (screenX < -30 || screenY < -30 || screenX > window.innerWidth + 30 || screenY > window.innerHeight + 30) bullets.splice(i, 1);
+        if (screenX < -30 || screenY < -30 || screenX > getWorldViewportWidth() + 30 || screenY > getWorldViewportHeight() + 30) bullets.splice(i, 1);
     }
 }
 
@@ -3375,7 +4971,11 @@ function resetSceneVisualState() {
     thunder.duration = 0;
     thunder.flashes = [];
     thunder.flashAlpha = 0;
-    thunder.cooldown = random(12, 24);
+    thunder.faceAfterglow = 0;
+    thunder.soundPlayed = false;
+    thunder.lastSoundAt = -999;
+    thunder.cooldown = 0;
+    thunder.reason = "time";
     danger.near = false;
     danger.blocked = false;
     danger.timer = random(0.45, 1.1);
@@ -3386,41 +4986,59 @@ function resetSceneVisualState() {
     sceneState.transitionTime = 0;
 }
 
-function startThunderEvent() {
+function startThunderEvent(reason = "time") {
+    if (sceneState.horde && reason !== "exposure") return;
+    thunder.reason = reason;
     thunder.active = true;
     thunder.elapsed = 0;
     thunder.flashes = [];
     thunder.flashAlpha = 0;
-    const count = 1 + Math.floor(Math.random() * 3);
-    let time = random(0.1, 0.7);
+    thunder.faceAfterglow = 0;
+    thunder.soundPlayed = false;
+    thunder.lastSoundAt = -999;
+    // 每次雷暴固定一个远处闪电亮源，避免每帧随机位置造成“屏幕特效”感。
+    thunder.glowX = random(.24, .76);
+    thunder.glowY = random(.08, .34);
+
+    // 恢复更接近真实闪电的“短促、不规则、多次回闪”，而不是长时间整屏发白。
+    const count = reason === "exposure" ? 5 + Math.floor(Math.random()*2) : reason === "gem" ? 3 + Math.floor(Math.random()*2) : 2 + Math.floor(Math.random()*3);
+    let time = random(.10, .28);
     for (let i = 0; i < count; i++) {
-        const duration = random(0.12, 0.5);
-        thunder.flashes.push({
-            start: time,
-            end: time + duration,
-            triggered: false
-        });
-        time += duration + random(0.15, 0.95);
+        const duration = random(.055, .16);
+        const peak = random(.62, 1.0) * (i === 0 ? 1 : random(.72, .98));
+        thunder.flashes.push({start: time, end: time + duration, peak, triggered: false});
+        const longGap = Math.random() < .26;
+        time += duration + (longGap ? random(.26,.62) : random(.055,.18));
     }
-    thunder.duration = thunder.flashes[thunder.flashes.length - 1].end + 0.2;
+    thunder.duration = thunder.flashes[thunder.flashes.length - 1].end + .34;
 }
 
 function updateThunder(dt) {
     if (!thunder.active) {
-        thunder.cooldown -= dt;
-        if (thunder.cooldown <= 0) {
-            startThunderEvent();
-            thunder.cooldown = random(14, 28);
-        }
+        thunder.faceAfterglow = Math.max(0, thunder.faceAfterglow - dt * 2.8);
         return;
     }
     thunder.elapsed += dt;
     thunder.flashAlpha = 0;
+    thunder.faceAfterglow = Math.max(0, thunder.faceAfterglow - dt * 2.2);
     for (const flash of thunder.flashes) {
         if (thunder.elapsed >= flash.start && thunder.elapsed <= flash.end) {
-            const progress = (thunder.elapsed - flash.start) / Math.max(0.001, flash.end - flash.start);
-            thunder.flashAlpha = Math.max(thunder.flashAlpha, 0.55 + Math.sin(progress * Math.PI) * 0.45);
-            if (!flash.triggered) flash.triggered = true;
+            const progress = (thunder.elapsed - flash.start) / Math.max(.001, flash.end - flash.start);
+            const envelope = progress < .18 ? progress/.18 : Math.pow(1-(progress-.18)/.82, 1.65);
+            thunder.flashAlpha = Math.max(thunder.flashAlpha, clamp(envelope,0,1) * flash.peak);
+            if (!flash.triggered) {
+                flash.triggered = true;
+                thunder.faceAfterglow = Math.max(thunder.faceAfterglow, .34);
+                // 游戏表现优先：每一道明显照出监管者的闪电都同步有雷声。
+                // 连续得太密的回闪做 0.22s 限流，避免三条长雷声完全糊在一起。
+                if (thunder.elapsed - thunder.lastSoundAt >= .22) {
+                    const first = !thunder.soundPlayed;
+                    thunder.soundPlayed = true;
+                    thunder.lastSoundAt = thunder.elapsed;
+                    const base = thunder.reason === "exposure" ? .52 : .45;
+                    playImmediateThunder(base * (first ? 1 : .72), random(.96,1.03));
+                }
+            }
         }
     }
     if (thunder.elapsed >= thunder.duration) {
@@ -3429,6 +5047,7 @@ function updateThunder(dt) {
         thunder.duration = 0;
         thunder.flashes = [];
         thunder.flashAlpha = 0;
+        thunder.soundPlayed = false;
     }
 }
 
@@ -3437,9 +5056,9 @@ function drawMaze() {
     const theme = getCurrentThemeAssets();
     const size = maze.tileSize;
     const startCol = Math.max(0, Math.floor(camera.x / size));
-    const endCol = Math.min(maze.cols - 1, Math.ceil((camera.x + window.innerWidth) / size));
+    const endCol = Math.min(maze.cols - 1, Math.ceil((camera.x + getWorldViewportWidth()) / size));
     const startRow = Math.max(0, Math.floor(camera.y / size));
-    const endRow = Math.min(maze.rows - 1, Math.ceil((camera.y + window.innerHeight) / size));
+    const endRow = Math.min(maze.rows - 1, Math.ceil((camera.y + getWorldViewportHeight()) / size));
     for (let row = startRow; row <= endRow; row++) {
         for (let col = startCol; col <= endCol; col++) {
             const tile = maze.grid[row][col];
@@ -3462,6 +5081,7 @@ function drawMaze() {
                     ctx.fillStyle = "#725033";
                     ctx.fillRect(x + 7, y + 7, size - 14, size - 14);
                 }
+                drawDoorIdentity(maze.doors.get(col + "," + row), x, y, size);
             }
         }
     }
@@ -3474,24 +5094,43 @@ function drawLampGlow() {
     ctx.save();
     ctx.globalCompositeOperation = "screen";
     for (const lamp of maze.lamps) {
-        const sx = lamp.x - camera.x;
-        const sy = lamp.y - camera.y;
-        if (sx < -lamp.radius || sy < -lamp.radius || sx > window.innerWidth + lamp.radius || sy > window.innerHeight + lamp.radius) continue;
-        const gradient = ctx.createRadialGradient(sx, sy, 0, sx, sy, lamp.radius);
+        const scale = getWorldRenderScale();
+        const sx = worldToScreenX(lamp.x);
+        const sy = worldToScreenY(lamp.y);
+        const radius = lamp.radius * scale;
+        if (sx < -radius || sy < -radius || sx > window.innerWidth + radius || sy > window.innerHeight + radius) continue;
+        const gradient = ctx.createRadialGradient(sx, sy, 0, sx, sy, radius);
         gradient.addColorStop(0, "rgba(155,108,34,0.32)");
         gradient.addColorStop(0.45, "rgba(128,84,24,0.20)");
         gradient.addColorStop(1, "rgba(92,55,12,0)");
         ctx.fillStyle = gradient;
         ctx.beginPath();
-        ctx.arc(sx, sy, lamp.radius, 0, Math.PI * 2);
+        ctx.arc(sx, sy, radius, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    // 随机传送道具自带小范围紫色光亮，方便在黑暗中辨认。
+    for (const item of maze.items) {
+        if (item.collected || item.type !== "warpPotion") continue;
+        const scale = getWorldRenderScale();
+        const sx = worldToScreenX(item.x);
+        const sy = worldToScreenY(item.y);
+        const radius = 82 * scale;
+        if (sx < -radius || sy < -radius || sx > window.innerWidth + radius || sy > window.innerHeight + radius) continue;
+        const gradient = ctx.createRadialGradient(sx, sy, 0, sx, sy, radius);
+        gradient.addColorStop(0, "rgba(196,104,255,0.30)");
+        gradient.addColorStop(0.48, "rgba(145,72,220,0.18)");
+        gradient.addColorStop(1, "rgba(105,44,175,0)");
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(sx, sy, radius, 0, Math.PI * 2);
         ctx.fill();
     }
     if (maze.portal) {
         const room = maze.rooms[maze.portal.roomId];
         if (room && room.door && room.door.open) {
-            const sx = room.center.x - camera.x;
-            const sy = room.center.y - camera.y;
-            const radius = maze.tileSize * 2.4;
+            const sx = worldToScreenX(room.center.x);
+            const sy = worldToScreenY(room.center.y);
+            const radius = maze.tileSize * 2.4 * getWorldRenderScale();
             const gradient = ctx.createRadialGradient(sx, sy, 0, sx, sy, radius);
             gradient.addColorStop(0, "rgba(164,120,210,0.22)");
             gradient.addColorStop(1, "rgba(110,70,160,0)");
@@ -3520,8 +5159,14 @@ function drawItems() {
         whetstone: assets.whetstone,
         oil: assets.oil
     };
+    const margin = maze.tileSize;
+    const minX = camera.x - margin;
+    const minY = camera.y - margin;
+    const maxX = camera.x + getWorldViewportWidth() + margin;
+    const maxY = camera.y + getWorldViewportHeight() + margin;
     for (const item of maze.items) {
         if (item.collected) continue;
+        if (item.x < minX || item.x > maxX || item.y < minY || item.y > maxY) continue;
         ctx.save();
         ctx.translate(item.x, item.y);
         let drawn = false;
@@ -3736,6 +5381,51 @@ function drawActorSprite(x, y, bodyAngle, fill, bodyImage, aimAngle = null, weap
     if (weaponId && aimAngle != null) drawHeldWeaponSprite(x, y, aimAngle, weaponId, alpha);
 }
 
+function updateSkillEffects(dt) {
+    for (let i = skillEffects.length - 1; i >= 0; i--) {
+        skillEffects[i].time -= dt;
+        if (skillEffects[i].time <= 0) skillEffects.splice(i, 1);
+    }
+}
+
+function drawSkillEffects() {
+    for (const e of skillEffects) {
+        if (e.type !== "katanaX") continue;
+        const t = clamp(e.time / e.duration, 0, 1);
+        const s = 22 + (1 - t) * 18;
+        ctx.save();
+        ctx.translate(e.x, e.y);
+        ctx.rotate(e.angle);
+        ctx.globalAlpha = t * 0.76;
+        ctx.strokeStyle = "rgba(220,240,255,.95)";
+        ctx.lineWidth = 4;
+        ctx.lineCap = "round";
+        ctx.beginPath(); ctx.moveTo(-s,-s); ctx.lineTo(s,s); ctx.moveTo(-s,s); ctx.lineTo(s,-s); ctx.stroke();
+        ctx.restore();
+    }
+}
+
+function drawChainsawRageLines() {
+    if (!weaponState.chainsawRage) return;
+    const cx = window.innerWidth / 2, cy = window.innerHeight / 2;
+    const radius = Math.hypot(window.innerWidth, window.innerHeight) * .55;
+    ctx.save();
+    ctx.strokeStyle = "rgba(0,0,0,.28)";
+    ctx.lineWidth = 3;
+    ctx.lineCap = "round";
+    for (let i = 0; i < 24; i++) {
+        const a = i / 24 * Math.PI * 2 + timeNow * 0.00008;
+        const wobble = 0.82 + ((i * 37) % 9) / 50;
+        const r1 = radius * wobble;
+        const r2 = r1 - 46 - ((i * 17) % 40);
+        ctx.beginPath();
+        ctx.moveTo(cx + Math.cos(a)*r1, cy + Math.sin(a)*r1);
+        ctx.lineTo(cx + Math.cos(a)*r2, cy + Math.sin(a)*r2);
+        ctx.stroke();
+    }
+    ctx.restore();
+}
+
 function drawDashTrail() {
     if (!player.dash || !player.dash.trail) return;
     let alpha = 0.42;
@@ -3797,8 +5487,19 @@ function getMonsterRenderScale(monster) {
 
 function drawMonsters() {
     const theme = getCurrentThemeAssets();
+    const margin = maze.tileSize * 1.5;
+    const minX = camera.x - margin;
+    const minY = camera.y - margin;
+    const maxX = camera.x + getWorldViewportWidth() + margin;
+    const maxY = camera.y + getWorldViewportHeight() + margin;
     for (const monster of monsters) {
+        if (monster.x < minX || monster.x > maxX || monster.y < minY || monster.y > maxY) continue;
         const scale = getMonsterRenderScale(monster);
+        if (monster.appearAsMedkit) {
+            const d = Math.hypot(monster.x - player.x, monster.y - player.y);
+            if (d <= maze.tileSize * 2) monster.appearAsMedkit = false;
+            else { drawSpriteCentered(assets.medkit, monster.x, monster.y, 34, 34, 0, 0.95); continue; }
+        }
         let drawX = monster.x;
         let drawY = monster.y;
         if ((monster.attackAnim || 0) > 0) {
@@ -3846,7 +5547,7 @@ function drawMonsters() {
             ctx.restore();
         }
         if (monster.state === "attack" && monster.attackPhase === "windup") {
-            const duration = monster.frenzy ? 0.34 : 0.55;
+            const duration = monster.frenzy ? 0.34 : 0.55 / getMonsterGemMultipliers().attackSpeed;
             const p = 1 - clamp(monster.attackPhaseTimer / duration, 0, 1);
             ctx.save();
             ctx.globalAlpha = 0.35 + p * 0.45;
@@ -3969,11 +5670,22 @@ function clearPortalRoomFromVisionMask() {
     visionCtx.globalAlpha = 1;
     visionCtx.fillStyle = "black";
     for (const cell of room.cells) {
-        const x = cell[0] * maze.tileSize - camera.x;
-        const y = cell[1] * maze.tileSize - camera.y;
-        visionCtx.fillRect(x, y, maze.tileSize, maze.tileSize);
+        const scale = getWorldRenderScale();
+        const x = worldToScreenX(cell[0] * maze.tileSize);
+        const y = worldToScreenY(cell[1] * maze.tileSize);
+        visionCtx.fillRect(x, y, maze.tileSize * scale, maze.tileSize * scale);
     }
     visionCtx.restore();
+}
+
+function isDirectorFlashlightOn() {
+    if (director.flashlightOff > 0) return false;
+    if (director.flashlightFlicker <= 0 || director.flashlightFlickerDuration <= 0) return true;
+    const elapsed=director.flashlightFlickerDuration-director.flashlightFlicker;
+    // 熄灭前快速“抽动”数次，黑帧比例逐渐升高，让玩家明确感到手电正在失灵。
+    const progress=clamp(elapsed/director.flashlightFlickerDuration,0,1);
+    const pulse=Math.sin(elapsed*(48+progress*34))+Math.sin(elapsed*97)*.52;
+    return pulse > (-.48 + progress*.58);
 }
 
 function drawVisionMask() {
@@ -3981,8 +5693,9 @@ function drawVisionMask() {
     const width = window.innerWidth;
     const height = window.innerHeight;
     const screen = getPlayerScreenPosition();
-    const range = getVisionRange();
+    const range = getVisionRange() * getWorldRenderScale();
     const half = getVisionAngle() / 2;
+    const flashlightAvailable = isDirectorFlashlightOn();
     const innerHalf = half * (1 - vision.edgeFade);
     visionCtx.clearRect(0, 0, width, height);
     visionCtx.globalCompositeOperation = "source-over";
@@ -3990,33 +5703,46 @@ function drawVisionMask() {
     visionCtx.fillStyle = sceneState.horde ? "rgba(0,0,0,0.18)" : "black";
     visionCtx.fillRect(0, 0, width, height);
     visionCtx.globalCompositeOperation = "destination-out";
-    const gradient = visionCtx.createRadialGradient(screen.x, screen.y, 0, screen.x, screen.y, range);
-    gradient.addColorStop(0, "rgba(0,0,0,1)");
-    gradient.addColorStop(0.82, "rgba(0,0,0,1)");
-    gradient.addColorStop(1, "rgba(0,0,0,0)");
-    const fadeSteps = 12;
-    for (let i = 0; i < fadeSteps; i++) {
-        const t = i / (fadeSteps - 1);
-        const currentHalf = innerHalf + (half - innerHalf) * t;
-        visionCtx.globalAlpha = 0.075;
-        buildVisionFan(currentHalf, range);
+    if (flashlightAvailable) {
+        const gradient = visionCtx.createRadialGradient(screen.x, screen.y, 0, screen.x, screen.y, range);
+        gradient.addColorStop(0, "rgba(0,0,0,1)");
+        gradient.addColorStop(0.82, "rgba(0,0,0,1)");
+        gradient.addColorStop(1, "rgba(0,0,0,0)");
+        const fadeSteps = 12;
+        for (let i = 0; i < fadeSteps; i++) {
+            const t = i / (fadeSteps - 1);
+            const currentHalf = innerHalf + (half - innerHalf) * t;
+            visionCtx.globalAlpha = 0.075;
+            buildVisionFan(currentHalf, range);
+            visionCtx.fillStyle = gradient;
+            visionCtx.fill();
+        }
+        visionCtx.globalAlpha = 1;
+        buildVisionFan(innerHalf, range);
         visionCtx.fillStyle = gradient;
         visionCtx.fill();
     }
-    visionCtx.globalAlpha = 1;
-    buildVisionFan(innerHalf, range);
-    visionCtx.fillStyle = gradient;
-    visionCtx.fill();
     for (const lamp of maze.lamps) {
-        const sx = lamp.x - camera.x;
-        const sy = lamp.y - camera.y;
-        if (sx < -lamp.radius || sy < -lamp.radius || sx > width + lamp.radius || sy > height + lamp.radius) continue;
-        punchLampLight(sx, sy, lamp.radius);
+        const scale = getWorldRenderScale();
+        const sx = worldToScreenX(lamp.x);
+        const sy = worldToScreenY(lamp.y);
+        const radius = lamp.radius * scale;
+        if (sx < -radius || sy < -radius || sx > width + radius || sy > height + radius) continue;
+        punchLampLight(sx, sy, radius);
+    }
+    for (const item of maze.items) {
+        if (item.collected || item.type !== "warpPotion") continue;
+        const scale = getWorldRenderScale();
+        const sx = worldToScreenX(item.x);
+        const sy = worldToScreenY(item.y);
+        const radius = 72 * scale;
+        if (sx < -radius || sy < -radius || sx > width + radius || sy > height + radius) continue;
+        punchLampLight(sx, sy, radius);
     }
     for (const clone of clones) {
-        const sx = clone.x - camera.x;
-        const sy = clone.y - camera.y;
-        const radius = 62;
+        const sx = worldToScreenX(clone.x);
+        const sy = worldToScreenY(clone.y);
+        const radius = 62 * getWorldRenderScale();
         const cloneLight = visionCtx.createRadialGradient(sx, sy, 0, sx, sy, radius);
         cloneLight.addColorStop(0, "rgba(0,0,0,0.95)");
         cloneLight.addColorStop(0.72, "rgba(0,0,0,0.55)");
@@ -4033,9 +5759,26 @@ function drawVisionMask() {
 }
 
 function drawThunderFlash() {
-    if (thunder.flashAlpha <= 0) return;
-    ctx.fillStyle = "rgba(255,255,255," + (0.18 + thunder.flashAlpha * 0.3) + ")";
-    ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+    const flash = thunder.flashAlpha;
+    const faceLight = Math.max(flash, thunder.faceAfterglow * .58);
+    if (flash > 0) {
+        const alpha = .08 + flash * .38;
+        ctx.fillStyle = "rgba(218,229,255," + alpha + ")";
+        ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+        // 轻微局部亮斑让闪电不像单纯叠一层白色蒙版。
+        const gx = window.innerWidth * thunder.glowX;
+        const gy = window.innerHeight * thunder.glowY;
+        const g = ctx.createRadialGradient(gx,gy,0,gx,gy,Math.max(window.innerWidth,window.innerHeight)*.72);
+        g.addColorStop(0,"rgba(235,242,255," + (flash*.16) + ")");
+        g.addColorStop(1,"rgba(210,225,255,0)");
+        ctx.fillStyle=g; ctx.fillRect(0,0,window.innerWidth,window.innerHeight);
+    }
+    if (!director.exposure.active && faceLight > 0) {
+        // 仍然若隐若现，但每次闪电至少能让玩家真正看清“那里有一张脸”。
+        const faceAlpha = clamp(.18 + getTimeDifficulty01() * .72, .18, .90) * clamp(faceLight * 1.25, 0, 1);
+        const eyes = clamp(director.gemDifficulty / 3, 0, 1) * clamp(faceLight * 1.15, 0, 1);
+        drawWatcherFace(faceAlpha, eyes);
+    }
 }
 
 function drawClosedRoomDarkness() {
@@ -4044,10 +5787,12 @@ function drawClosedRoomDarkness() {
     for (const room of maze.rooms) {
         if (!room.door || room.door.open || !isSealedRoom(room)) continue;
         for (const cell of room.cells) {
-            const x = cell[0] * maze.tileSize - camera.x;
-            const y = cell[1] * maze.tileSize - camera.y;
-            if (x + maze.tileSize < 0 || y + maze.tileSize < 0 || x > window.innerWidth || y > window.innerHeight) continue;
-            ctx.fillRect(x, y, maze.tileSize, maze.tileSize);
+            const scale = getWorldRenderScale();
+            const x = worldToScreenX(cell[0] * maze.tileSize);
+            const y = worldToScreenY(cell[1] * maze.tileSize);
+            const size = maze.tileSize * scale;
+            if (x + size < 0 || y + size < 0 || x > window.innerWidth || y > window.innerHeight) continue;
+            ctx.fillRect(x, y, size, size);
         }
     }
     ctx.restore();
@@ -4065,12 +5810,14 @@ function drawInteractPrompt() {
         }
         if (item.type === "whetstone") text = item.cooldown > 0 ? "磨刀石冷却 " + Math.ceil(item.cooldown) + "s" : "E 使用磨刀石";
         if (item.type === "oil") text = item.cooldown > 0 ? "机油冷却 " + Math.ceil(item.cooldown) + "s" : "E 使用机油";
+        if (item.type === "warpPotion") text = (isMobileControls() ? "交互键" : "E") + " 拾取随机传送";
     }
     if (target.type === "door") text = player.keys > 0 ? "E 开门" : "需要钥匙";
     if (target.type === "portal") {
         const insertedCount = Object.values(target.target.inserted || {}).filter(Boolean).length;
-        const heldCount = Number(player.gems.red) + Number(player.gems.yellow) + Number(player.gems.blue);
-        text = target.target.active ? "进入传送门" : heldCount > 0 ? "E 镶嵌宝石  " + insertedCount + "/3" : "传送门宝石 " + insertedCount + "/3";
+        const heldCount = heldGemCount();
+        const interactLabel = isMobileControls() ? "交互键" : "E";
+        text = target.target.active ? "进入传送门" : heldCount > 0 ? interactLabel + " 镶嵌宝石  " + insertedCount + "/3" : "传送门宝石 " + insertedCount + "/3";
     }
     if (!text) return;
     ctx.save();
@@ -4082,7 +5829,30 @@ function drawInteractPrompt() {
     ctx.lineWidth = 4;
     ctx.strokeStyle = "black";
     ctx.strokeText(text, x, y);
-    ctx.fillStyle = "white";
+    ctx.fillStyle = target.type === "portal" && heldGemCount() > 0 ? "#dcbcff" : "white";
+    ctx.fillText(text, x, y);
+    ctx.restore();
+}
+
+function drawPortalGemReminder() {
+    if (!maze.portal || heldGemCount() <= 0 || maze.portal.active) return;
+    const room = maze.rooms[maze.portal.roomId];
+    if (!room || !room.door || !room.door.open) return;
+    const distance = Math.hypot(maze.portal.x - player.x, maze.portal.y - player.y);
+    if (distance > maze.tileSize * 3) return;
+    const text = isMobileControls() ? "靠近传送门，按交互键镶嵌宝石" : "靠近传送门，按 E 镶嵌宝石";
+    const pulse = 0.88 + ((Math.sin(timeNow * 0.006) + 1) * 0.06);
+    ctx.save();
+    ctx.globalAlpha = pulse;
+    ctx.font = "bold 18px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const x = window.innerWidth / 2;
+    const y = window.innerHeight * 0.67;
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = "rgba(0,0,0,0.92)";
+    ctx.strokeText(text, x, y);
+    ctx.fillStyle = "#dcbcff";
     ctx.fillText(text, x, y);
     ctx.restore();
 }
@@ -4118,80 +5888,74 @@ function drawMouseRightIcon(cx, cy, scale = 1) {
 
 function drawTrapQte() {
     if (!trapQte.active) return;
+    if (trapQte.phase === "warning") return;
+
     const cx = window.innerWidth / 2;
-    const cy = window.innerHeight * 0.42;
-    ctx.save();
-    if (trapQte.phase === "warning") {
-        const pulse = 0.65 + Math.sin(timeNow * 0.018) * 0.25;
-        ctx.globalAlpha = pulse;
-        ctx.strokeStyle = "#ff6868";
-        ctx.lineWidth = 6;
-        ctx.beginPath();
-        ctx.arc(cx, cy, 54, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-        drawMouseRightIcon(cx, cy, 0.95);
-        ctx.font = "bold 20px sans-serif";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.lineWidth = 5;
-        ctx.strokeStyle = "black";
-        ctx.strokeText("陷阱！准备判定", cx, cy + 82);
-        ctx.fillStyle = "#ff8b8b";
-        ctx.fillText("陷阱！准备判定", cx, cy + 82);
-        ctx.restore();
-        return;
-    }
+    const cy = window.innerHeight / 2;
     const r = 72;
-    ctx.fillStyle = "rgba(0,0,0,0.76)";
-    ctx.beginPath();
-    ctx.arc(cx, cy, r + 18, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = "rgba(255,255,255,0.45)";
-    ctx.lineWidth = 8;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.strokeStyle = "#8fd69a";
-    ctx.lineWidth = 12;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, trapQte.successStart, trapQte.successStart + trapQte.successSize);
-    ctx.stroke();
-    ctx.strokeStyle = "#ffd966";
-    ctx.lineWidth = 14;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, trapQte.greatStart, trapQte.greatStart + trapQte.greatSize);
-    ctx.stroke();
-    const nx = cx + Math.cos(trapQte.needleAngle) * r;
-    const ny = cy + Math.sin(trapQte.needleAngle) * r;
-    ctx.strokeStyle = "white";
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.moveTo(cx, cy);
-    ctx.lineTo(nx, ny);
-    ctx.stroke();
-    ctx.fillStyle = "#ff5d5d";
-    ctx.beginPath();
-    ctx.arc(nx, ny, 7, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = "white";
+    const appear = clamp(trapQte.activeTime / 0.08, 0, 1);
+    const scale = 0.88 + appear * 0.12;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(scale, scale);
+    ctx.globalAlpha = appear;
+
+    // DBD 风格：只有一圈非常轻的灰白色圆环，不铺黑色圆盘背景。
+    ctx.lineCap = "butt";
+    ctx.strokeStyle = "rgba(225,230,235,0.40)";
     ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
     ctx.stroke();
-    drawMouseRightIcon(cx, cy, 0.72);
-    ctx.font = "14px sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillStyle = "rgba(255,255,255,0.9)";
-    ctx.fillText("绿色：成功   金色：高精准", cx, cy + 112);
+
+    // Good 区：偏灰白，不用绿色。
+    ctx.strokeStyle = "rgba(235,238,240,0.84)";
+    ctx.lineWidth = 7;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, trapQte.successStart, trapQte.successStart + trapQte.successSize);
+    ctx.stroke();
+
+    // Great 区：仍是同色系，只更亮、更窄，避免“街机彩色 UI”感。
+    ctx.save();
+    ctx.shadowColor = "rgba(255,255,255,0.75)";
+    ctx.shadowBlur = 5;
+    ctx.strokeStyle = "rgba(255,255,255,0.98)";
+    ctx.lineWidth = 9;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, trapQte.greatStart, trapQte.greatStart + trapQte.greatSize);
+    ctx.stroke();
     ctx.restore();
+
+    // 红色扫针从中心附近扫到圆环外侧，亮点集中在圆环交点。
+    const a = trapQte.needleAngle;
+    const ux = Math.cos(a);
+    const uy = Math.sin(a);
+    ctx.save();
+    ctx.shadowColor = "rgba(255,45,38,0.95)";
+    ctx.shadowBlur = 8;
+    ctx.strokeStyle = "rgba(255,55,45,0.96)";
+    ctx.lineWidth = 2.6;
+    ctx.beginPath();
+    ctx.moveTo(ux * 19, uy * 19);
+    ctx.lineTo(ux * (r + 10), uy * (r + 10));
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.restore();
+
+    // 键鼠模式提示右键；手机模式由右下角交互/QTE按钮高亮提示。
+    if (!isMobileControls()) drawMouseRightIcon(cx, cy, 0.64);
 }
 
 function drawWeaponHud() {
     const mainWeaponId = weaponState.current;
     const subWeaponId = weaponState.current === "pistol" ? weaponState.secondary : "pistol";
-    const baseX = 86;
-    const baseY = window.innerHeight - 86;
-    const mainR = 42;
-    const subR = 28;
+    const mobile = isMobileControls();
+    const baseX = mobile ? 62 : 86;
+    const baseY = mobile ? 126 : window.innerHeight - 86;
+    const mainR = mobile ? 32 : 42;
+    const subR = mobile ? 21 : 28;
     const anim = weaponState.uiSwap > 0 ? weaponState.uiSwap / 0.22 : 0;
     const ease = 1 - Math.pow(1 - anim, 2);
     const slide = ease * 16;
@@ -4223,11 +5987,11 @@ function drawWeaponHud() {
     const weapon = weapons[mainWeaponId];
     let ammoText = "";
     if (weapon.type === "gun") ammoText = weapon.mag + "/" + (mainWeaponId === "pistol" || sceneState.horde ? "∞" : weapon.reserve);
-    else ammoText = Math.ceil(weapon.durability) + "/∞";
+    else ammoText = "∞/∞";
     ctx.save();
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
-    ctx.font = "22px sans-serif";
+    ctx.font = (mobile ? "17px" : "22px") + " sans-serif";
     ctx.lineWidth = 5;
     ctx.strokeStyle = "black";
     ctx.strokeText(ammoText, baseX + 56, baseY - 2);
@@ -4239,6 +6003,7 @@ function drawWeaponHud() {
 function drawGemObjectiveHud() {
     const cx = window.innerWidth / 2;
     if (sceneState.horde) {
+        if (director.exposure.active) return;
         const pulse = 0.72 + Math.sin(timeNow * 0.012) * 0.28;
         ctx.save();
         ctx.textAlign = "center";
@@ -4306,12 +6071,30 @@ function drawGemObjectiveHud() {
 }
 
 function drawKeysAndHelp() {
-    const startX = 20;
-    const y = 48;
-    const size = 20;
+    const mobile = isMobileControls();
+    const startX = mobile ? 16 : 20;
+    const y = mobile ? 38 : 48;
+    const size = mobile ? 17 : 20;
     for (let i = 0; i < player.keys; i++) {
-        const x = startX + i * 18;
+        const x = startX + i * (mobile ? 15 : 18);
         if (assets.key && assets.key.complete && assets.key.naturalWidth) ctx.drawImage(assets.key, x, y, size, size);
+    }
+    if (mobile) {
+        ctx.save();
+        ctx.font = "12px sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.lineWidth = 3;
+        const coinText = "◆ " + sceneState.sceneCoins + "  ◇ " + sceneState.bankedCoins;
+        ctx.strokeStyle = "black"; ctx.strokeText(coinText, 16, 62);
+        ctx.fillStyle = "#f1c84a"; ctx.fillText(coinText, 16, 62);
+        if (clones.length > 0) {
+            const cloneText = "分身 " + clones.map((clone) => Math.ceil(Math.max(0, clone.life || 0)) + "s").join("/");
+            ctx.strokeText(cloneText, 16, 79);
+            ctx.fillStyle = "#7fe7ff"; ctx.fillText(cloneText, 16, 79);
+        }
+        ctx.restore();
+        return;
     }
     ctx.save();
     ctx.font = "13px sans-serif";
@@ -4323,28 +6106,40 @@ function drawKeysAndHelp() {
     ctx.strokeText(help, 20, 74);
     ctx.fillStyle = "rgba(255,255,255,0.88)";
     ctx.fillText(help, 20, 74);
+    const skillInfo = weaponState.current === "katana"
+        ? "空格技能：瞬斩突进｜路径斩击"
+        : weaponState.current === "chainsaw"
+            ? "空格技能：狂暴冲锋｜高速切割"
+            : "空格技能：穿墙闪现｜路径怪物眩晕3秒";
+    ctx.font = "13px sans-serif";
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = "black";
+    ctx.strokeText(skillInfo, 20, 94);
+    ctx.fillStyle = "rgba(230,240,255,.92)";
+    ctx.fillText(skillInfo, 20, 94);
     ctx.font = "13px sans-serif";
     ctx.lineWidth = 4;
     ctx.strokeStyle = "black";
     const coinText = "金币  本局 " + sceneState.sceneCoins + "   背包 " + sceneState.bankedCoins;
-    ctx.strokeText(coinText, 20, 94);
+    ctx.strokeText(coinText, 20, 114);
     ctx.fillStyle = "#f1c84a";
-    ctx.fillText(coinText, 20, 94);
+    ctx.fillText(coinText, 20, 114);
     if (clones.length > 0) {
         const cloneText = "分身 " + clones.map((clone) => Math.ceil(Math.max(0, clone.life || 0)) + "s").join(" / ");
         ctx.strokeStyle = "black";
-        ctx.strokeText(cloneText, 20, 114);
+        ctx.strokeText(cloneText, 20, 134);
         ctx.fillStyle = "#7fe7ff";
-        ctx.fillText(cloneText, 20, 114);
+        ctx.fillText(cloneText, 20, 134);
     }
     ctx.restore();
 }
 
 function drawStatus() {
-    const healthWidth = 180;
-    const healthHeight = 12;
-    const x = 20;
-    const y = 20;
+    const mobile = isMobileControls();
+    const healthWidth = mobile ? 145 : 180;
+    const healthHeight = mobile ? 9 : 12;
+    const x = mobile ? 16 : 20;
+    const y = mobile ? 14 : 20;
     ctx.fillStyle = "black";
     ctx.fillRect(x - 3, y - 3, healthWidth + 6, healthHeight + 6);
     ctx.strokeStyle = "white";
@@ -4354,29 +6149,45 @@ function drawStatus() {
     ctx.fillRect(x, y, healthWidth * getHealthRatio(), healthHeight);
     drawKeysAndHelp();
     drawGemObjectiveHud();
-    if (player.stamina < player.maxStamina - 0.1 || player.staminaFlash > 0 || weaponState.chainsawRage) {
-        const width = 220;
-        const height = 12;
-        const sx = (window.innerWidth - width) / 2;
-        const sy = window.innerHeight - 48;
-        ctx.fillStyle = "black";
-        ctx.fillRect(sx - 3, sy - 3, width + 6, height + 6);
+    {
+        const width = mobile ? 170 : 222;
+        const cx = window.innerWidth / 2;
+        const sy = window.innerHeight - (mobile ? 24 : 46);
+        const half = width / 2;
+        const ratio = clamp(player.stamina / player.maxStamina, 0, 1);
         const red = player.staminaFlash > 0 ? Math.min(1, player.staminaFlash) : 0;
-        ctx.strokeStyle = red > 0 ? "rgba(255,70,70," + (0.35 + red * 0.65) + ")" : "white";
-        ctx.lineWidth = red > 0 ? 4 : 2;
-        ctx.strokeRect(sx - 3, sy - 3, width + 6, height + 6);
-        ctx.fillStyle = "white";
-        ctx.fillRect(sx, sy, width * (player.stamina / player.maxStamina), height);
+        ctx.save();
+        ctx.lineCap = "round";
+        ctx.lineWidth = 1.4;
+        ctx.strokeStyle = "rgba(255,255,255,.24)";
+        ctx.beginPath(); ctx.moveTo(cx-half,sy); ctx.lineTo(cx+half,sy); ctx.stroke();
+        ctx.strokeStyle = red > 0 ? "rgba(255,80,80," + (0.55 + red * .45) + ")" : "rgba(255,255,255,.94)";
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.moveTo(cx - half*ratio, sy); ctx.lineTo(cx, sy);
+        ctx.moveTo(cx, sy); ctx.lineTo(cx + half*ratio, sy);
+        ctx.stroke();
+        ctx.fillStyle = "rgba(255,255,255,.72)";
+        for (const px of [cx-half, cx+half]) {
+            ctx.beginPath(); ctx.arc(px,sy,2.25,0,Math.PI*2); ctx.fill();
+        }
+        ctx.beginPath(); ctx.arc(cx,sy,2.2,0,Math.PI*2); ctx.fillStyle=ctx.strokeStyle; ctx.fill();
+        ctx.restore();
     }
     drawWeaponHud();
 }
 
 function drawRadar() {
-    const radius = 76;
-    const cx = window.innerWidth - 94;
-    const cy = 94;
+    const carryingGem = heldGemCount() > 0;
+    // 暴露阶段通常关闭雷达；但只要手里仍有宝石，保留导航直到宝石镶嵌完成。
+    if (sceneState.horde && !carryingGem) return;
+    const mobile = isMobileControls();
+    const radius = mobile ? 58 : 76;
+    const cx = window.innerWidth - (mobile ? 70 : 94);
+    const cy = mobile ? 70 : 94;
     const scale = 0.055;
-    const rot = -aim.angle - Math.PI / 2;
+    const glitch = director.radarGlitch > 0 ? Math.sin(timeNow * 0.017 + director.radarGlitchSeed) * 0.18 : 0;
+    const rot = -aim.angle - Math.PI / 2 + glitch;
     const cos = Math.cos(rot);
     const sin = Math.sin(rot);
     function radarPos(wx, wy) {
@@ -4397,6 +6208,7 @@ function drawRadar() {
         const row = Number(parts[1]);
         const p = tileCenter(col, row);
         const pos = radarPos(p.x, p.y);
+        if (director.radarGlitch > 0 && ((col * 31 + row * 17 + Math.floor(director.radarGlitchSeed)) % 7 === 0)) { pos.x += 10; pos.y -= 7; }
         if (Math.hypot(pos.x, pos.y) > radius + 8) continue;
         ctx.fillStyle = "#555";
         ctx.fillRect(pos.x - 2.5, pos.y - 2.5, 5, 5);
@@ -4437,7 +6249,7 @@ function drawRadar() {
         ctx.fillRect(6, 0, 2, 4);
         ctx.restore();
     }
-    if (maze.portal && maze.portal.visibleOnRadar) {
+    if (maze.portal && (maze.portal.visibleOnRadar || carryingGem)) {
         const pos = radarPos(maze.portal.x, maze.portal.y);
         const d = Math.hypot(pos.x, pos.y);
         let x = pos.x;
@@ -4446,10 +6258,16 @@ function drawRadar() {
             x = x / d * (radius - 10);
             y = y / d * (radius - 10);
         }
-        ctx.fillStyle = "#b06cff";
+        const blink = carryingGem ? 0.25 + Math.pow((Math.sin(timeNow * 0.009) + 1) * 0.5, 3) * 0.75 : 1;
+        ctx.save();
+        ctx.globalAlpha = blink;
+        ctx.shadowColor = "rgba(190,120,255,0.9)";
+        ctx.shadowBlur = carryingGem ? 10 : 4;
+        ctx.fillStyle = "#bd7cff";
         ctx.beginPath();
-        ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+        ctx.arc(x, y, carryingGem ? 5.2 : 4.5, 0, Math.PI * 2);
         ctx.fill();
+        ctx.restore();
     }
     ctx.fillStyle = "white";
     ctx.beginPath();
@@ -4562,6 +6380,7 @@ function restartGame() {
     weapons.katana.durability = weapons.katana.maxDurability;
     weapons.chainsaw.durability = weapons.chainsaw.maxDurability;
     monsterExplosionEffects.length = 0;
+    skillEffects.length = 0;
     notices.length = 0;
     game.style.cursor = "none";
     resetSceneVisualState();
@@ -4569,7 +6388,7 @@ function restartGame() {
     updateCamera();
     aim.angle = 0;
     aim.targetAngle = 0;
-    crosshair.distance = crosshair.maxDistance;
+    crosshair.distance = isMobileControls() ? mobileInput.aimDistance : crosshair.maxDistance;
     spawnInitialMonsterGroups();
     startCameraFlyIn();
 }
@@ -4594,11 +6413,139 @@ function initializeGame() {
     mouse.y = screen.y;
     aim.angle = 0;
     aim.targetAngle = 0;
-    crosshair.distance = crosshair.maxDistance;
+    crosshair.distance = isMobileControls() ? mobileInput.aimDistance : crosshair.maxDistance;
     spawnInitialMonsterGroups();
 }
 
 initializeGame();
+
+// 独立移动端控制层只通过这个小接口接入，避免把触摸/UI逻辑塞进主游戏代码。
+window.gameMobileApi = {
+    setMode: setControlMode,
+    getMode: () => controlState.mode,
+    setUiPaused: (paused) => {
+        controlState.uiPaused = !!paused;
+        if (controlState.uiPaused) stopAudioNow(audioState.portalHum);
+    },
+    setMove: (x, y, run) => {
+        mobileInput.moveX = clamp(Number(x) || 0, -1, 1);
+        mobileInput.moveY = clamp(Number(y) || 0, -1, 1);
+        mobileInput.run = !!run;
+    },
+    setAim: (angle, distanceRatio = 0.55) => {
+        if (!Number.isFinite(angle)) return;
+        aim.targetAngle = angle;
+        const ratio = clamp(Number(distanceRatio) || 0, 0, 1);
+        mobileInput.aimDistance = crosshair.minDistance + (crosshair.maxDistance - crosshair.minDistance) * ratio;
+    },
+    setAimAngle: (angle) => {
+        if (!Number.isFinite(angle)) return;
+        aim.targetAngle = angle;
+    },
+    getAimAngle: () => aim.targetAngle,
+    attackDown: () => {
+        if (sceneState.dead || controlState.uiPaused) return;
+        unlockAudio();
+        crosshair.targetScale = 1.3;
+        weaponState.triggerDown = true;
+        tryAttack(true);
+    },
+    attackUp: () => {
+        crosshair.targetScale = 1;
+        weaponState.triggerDown = false;
+        if (weaponState.current === "chainsaw" && !weaponState.chainsawRage) stopAudioNow(audioState.chainsawSweepAudio);
+    },
+    interact: () => {
+        if (sceneState.dead || controlState.uiPaused) return;
+        unlockAudio();
+        if (trapQte.active) resolveTrapQte();
+        else interact();
+    },
+    skill: () => { if (!sceneState.dead && !controlState.uiPaused) { unlockAudio(); useStaminaSkill(); } },
+    reload: () => { if (!sceneState.dead && !controlState.uiPaused) { unlockAudio(); startReload(); } },
+    switchWeapon: () => { if (!sceneState.dead && !controlState.uiPaused) { unlockAudio(); toggleWeapon(); } },
+    isQteActive: () => !!trapQte.active,
+    isDead: () => !!sceneState.dead,
+    restart: () => { if (sceneState.dead) restartGame(); },
+    getWeapon: () => weaponState.current,
+    getStaminaRatio: () => clamp(player.stamina / player.maxStamina, 0, 1)
+};
+
+function loadMobileControlsLayer() {
+    return new Promise((resolve) => {
+        const script = document.createElement("script");
+        script.src = new URL("./mobile_controls.js", GAME_SCRIPT_URL).href;
+        script.async = true;
+        script.onload = () => resolve(true);
+        script.onerror = () => {
+            console.error("mobile_controls.js 加载失败，自动回退为键鼠模式");
+            setControlMode("keyboard");
+            resolve(false);
+        };
+        document.head.appendChild(script);
+    });
+}
+
+// ---------- 首次进入关键资源加载 ----------
+const CORE_SPRITE_NAMES = [
+    "pistol","bullet","medkit","key","gemRed","gemYellow","gemBlue",
+    "wall_urban","door_urban","floor_urban","player_urban","zombie_urban",
+    "wall_rust","door_rust","floor_rust","player_rust","zombie_rust",
+    "wall_lab","door_lab","floor_lab","player_lab","zombie_lab"
+];
+
+function waitForSpriteReady(name, timeoutMs = 10000) {
+    const image = spriteAssets[name];
+    if (!image) return Promise.resolve(false);
+    if (image.complete) return Promise.resolve(image.naturalWidth > 0);
+    return new Promise(resolve => {
+        let settled = false;
+        const finish = ok => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            image.removeEventListener("load", onLoad);
+            image.removeEventListener("error", onError);
+            resolve(ok);
+        };
+        const onLoad = () => finish(image.naturalWidth > 0);
+        const onError = () => finish(false);
+        image.addEventListener("load", onLoad, {once:true});
+        image.addEventListener("error", onError, {once:true});
+        const timer = setTimeout(() => finish(image.complete && image.naturalWidth > 0), timeoutMs);
+    });
+}
+
+let startupResourcesReady = false;
+async function startInitialResourceLoading() {
+    const tasks = [];
+    for (const name of CORE_SPRITE_NAMES) tasks.push({kind:"图片", name, promise:waitForSpriteReady(name)});
+    for (const name of CORE_AUDIO_NAMES) tasks.push({kind:"音效", name, promise:preloadAudioResource(name, 15000)});
+    let done = 0;
+    const failed = [];
+    const total = tasks.length;
+    startupLoadingUi.update(0, total, "加载移动、战斗与基础场景资源…");
+    await Promise.all(tasks.map(async task => {
+        let ok = false;
+        try { ok = await task.promise; } catch (_) { ok = false; }
+        done++;
+        if (!ok) failed.push(`${task.kind}:${task.name}`);
+        startupLoadingUi.update(done, total, done < total ? "加载移动、战斗与基础场景资源…" : "检查资源完整性…");
+    }));
+    if (failed.length) {
+        startupLoadingUi.fail(failed);
+        return false;
+    }
+    startupResourcesReady = true;
+    startupLoadingUi.update(total, total, "正在准备操作界面…");
+    await loadMobileControlsLayer();
+    startupLoadingUi.complete();
+    // 不阻塞玩家：后期才会遇到的资源进入游戏后分批慢慢加载。
+    setTimeout(preloadRemainingAudioResources, 250);
+    return true;
+}
+
+startInitialResourceLoading();
 
 // 游戏循环
 let timeNow = performance.now();
@@ -4610,11 +6557,12 @@ let lastTime = timeNow;
     weaponState.uiSwap = Math.max(0, weaponState.uiSwap - dt);
     updateCamera();
     updateAim(dt);
-    if (!sceneState.dead) {
+    if (startupResourcesReady && controlState.mode !== "select" && !controlState.uiPaused && !sceneState.dead) {
         updatePlayer(dt);
         updateCamera();
         updateAim(dt);
         updateSceneTimer(dt);
+        updateAudio(dt);
         updateMonsterSpawner(dt);
         updateMonsters(dt);
         updateWeapon(dt);
@@ -4626,15 +6574,20 @@ let lastTime = timeNow;
         updateThunder(dt);
         updateNotices(dt);
         updateMonsterExplosionEffects(dt);
+        updateSkillEffects(dt);
     }
     ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
     ctx.fillStyle = "black";
     ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
     ctx.save();
+    const worldScale = getWorldRenderScale();
+    ctx.scale(worldScale, worldScale);
     ctx.translate(-camera.x, -camera.y);
     drawMaze();
     drawLamps();
     drawItems();
+    drawRoomDecorations();
+    drawParanormalWorld();
     drawPortal();
     drawTrapEffects();
     drawBullets();
@@ -4642,17 +6595,22 @@ let lastTime = timeNow;
     drawMonsterExplosionEffects();
     drawClones();
     drawDashTrail();
+    drawSkillEffects();
     ctx.restore();
     drawVisionMask();
     drawLampGlow();
     drawClosedRoomDarkness();
     ctx.save();
+    ctx.scale(worldScale, worldScale);
     ctx.translate(-camera.x, -camera.y);
     drawPlayer();
     ctx.restore();
     drawThunderFlash();
+    drawExposureOverlay();
+    drawChainsawRageLines();
     drawCrosshair();
     drawInteractPrompt();
+    drawPortalGemReminder();
     drawStatus();
     drawRadar();
     drawTrapQte();

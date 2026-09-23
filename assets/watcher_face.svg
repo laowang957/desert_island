@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <radialGradient id="face" cx="48%" cy="40%" r="62%">
+      <stop offset="0" stop-color="#d8d9dc" stop-opacity=".93"/>
+      <stop offset=".55" stop-color="#969aa2" stop-opacity=".80"/>
+      <stop offset=".88" stop-color="#444851" stop-opacity=".44"/>
+      <stop offset="1" stop-color="#20232a" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="blur"><feGaussianBlur stdDeviation="3"/></filter>
+  </defs>
+  <path d="M128 21 C176 21 205 63 201 119 C198 177 171 220 127 227 C86 219 57 180 54 122 C51 66 82 23 128 21Z" fill="url(#face)"/>
+  <path d="M62 92 Q91 70 118 91 Q95 120 62 101Z" fill="#0c0d11" opacity=".93"/>
+  <path d="M194 92 Q165 70 138 91 Q161 120 194 101Z" fill="#0c0d11" opacity=".93"/>
+  <ellipse cx="94" cy="96" rx="6" ry="4" fill="#848992" opacity=".45"/>
+  <ellipse cx="162" cy="96" rx="6" ry="4" fill="#848992" opacity=".45"/>
+  <path d="M127 103 C119 125 119 141 128 147 C136 140 136 123 127 103Z" fill="#555961" opacity=".62"/>
+  <path d="M88 171 Q127 162 168 171 Q151 184 128 184 Q104 184 88 171Z" fill="#121318" opacity=".82"/>
+  <path d="M79 157 Q128 148 177 158" fill="none" stroke="#2a2c32" stroke-opacity=".28" stroke-width="7" filter="url(#blur)"/>
+  <path d="M52 76 Q128 8 205 76" fill="none" stroke="#e7e8eb" stroke-opacity=".10" stroke-width="10" filter="url(#blur)"/>
+</svg>
